@@ -1,0 +1,20 @@
+# Example sweep configuration
+name: example_pitchfork
+seed: 2025
+N: 20000
+T: 300.0
+dt: 0.01
+burn_in: 100.0
+params:
+  lambda: 1.0
+  sigma: 0.8
+  theta: 2.0
+  c0: 0.5
+  hazard:
+    kind: step
+    nu0: 0.5
+sweep:
+  kappa_from: 0.0
+  kappa_to_factor_of_kstar: 2.0   # sweep up to factor × κ*
+  points: 21
+output_dir: outputs/example_pitchfork
