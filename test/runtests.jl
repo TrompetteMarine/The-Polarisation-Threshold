@@ -10,3 +10,5 @@ using BeliefSim.Stats
     κcrit = critical_kappa(p; Vstar=Vstar)
     @test κcrit > 0.0
 end
+
+include("test_bifurcation.jl")

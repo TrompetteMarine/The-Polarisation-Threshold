@@ -162,3 +162,37 @@ julia --project scripts/run_from_yaml.jl configs/example_sweep.yaml
 - **Fit unstable**: restrict the window (`κmin`, `κmax`) closer to the transition and increase the number of \(\kappa\)-grid points.
 
 MIT License.
+
+## 9) Bifurcation Toolkit
+
+A lightweight Julia toolkit bundles the deterministic normal-form surrogate together with
+CairoMakie figures and continuation diagnostics.
+
+### Installation
+
+```julia
+] activate .
+] instantiate
+```
+
+### Figure + diagnostic commands
+
+```bash
+julia --project=. scripts/make_phase_portraits.jl
+julia --project=. scripts/scan_hopf_and_cycles.jl
+julia --project=. scripts/scan_homoclinic.jl
+```
+
+All scripts honour command-line options. For example, `make_phase_portraits.jl` accepts `--kappas`
+(a comma-separated list of κ values) and `--lims` (phase-portrait bounds). The limit-cycle and
+homoclinic scanners iterate over default κ ranges; adjust the ranges in the scripts or expose new
+flags to explore alternative windows.
+
+### Notes & caveats
+
+- The deterministic vector field is a cubic mean-field closure of the OU-with-resets model; its
+  pitchfork at κ≈κ* mirrors the stochastic transition.
+- Hopf and homoclinic diagnostics integrate the vector field directly. They are heuristic unless an
+  analytic Jacobian or refined shooting/continuation scheme is supplied.
+- Figures are emitted as both PNG and PDF in `figs/` with an elegant CairoMakie theme, consistent
+  axes, and κ/κ* annotations.
