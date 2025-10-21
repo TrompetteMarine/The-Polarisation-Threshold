@@ -13,6 +13,21 @@ fi
 echo "Instantiating Julia project at $ROOT_DIR"
 julia --project=. --color=yes -e '
 using Pkg
+
+function ensure_general_registry!()
+    regs = try
+        Pkg.Registry.reachable_registries()
+    catch err
+        @info "Unable to query registries, refreshing metadata" exception = err
+        Pkg.Registry.update()
+        Pkg.Registry.reachable_registries()
+    end
+    if all(reg.name != "General" for reg in regs)
+        @info "Adding General registry"
+        Pkg.Registry.add(Pkg.RegistrySpec(name="General", url="https://github.com/JuliaRegistries/General.git"))
+    end
+end
+
 function ensure_manifest_consistency!()
     project_deps = collect(keys(Pkg.project().dependencies))
     manifest = try
@@ -22,12 +37,15 @@ function ensure_manifest_consistency!()
         Pkg.resolve()
         return
     end
-    missing = setdiff(project_deps, collect(keys(manifest.dependencies)))
+    manifest_deps = manifest === nothing ? String[] : collect(keys(manifest.dependencies))
+    missing = setdiff(project_deps, manifest_deps)
     if !isempty(missing)
         @info "Resolving manifest to include new direct dependencies" missing
         Pkg.resolve()
     end
 end
+
+ensure_general_registry!()
 ensure_manifest_consistency!()
 try
     Pkg.instantiate()
