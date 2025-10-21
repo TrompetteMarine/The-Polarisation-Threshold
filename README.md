@@ -20,6 +20,13 @@ a minimal, reproducible pipeline to recover the **polarization threshold** \(\ka
 ] instantiate
 ```
 
+Or run the one-liner bootstrap script, which will install Julia dependencies, precompile the
+environment, and create the standard output folders:
+
+```bash
+./scripts/setup_environment.sh
+```
+
 ---
 
 ## 1) Quick replication — minimal run
