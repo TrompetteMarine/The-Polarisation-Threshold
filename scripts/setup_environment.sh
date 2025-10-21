@@ -27,14 +27,39 @@ function ensure_general_registry!()
     end
 end
 
-ensure_general_registry!()
-try
-    Pkg.instantiate()
-catch err
-    @warn "Pkg.instantiate() failed, attempting resolve before retry" exception = err
-    Pkg.resolve()
-    Pkg.instantiate()
+function ensure_dependencies!()
+    required = [
+        PackageSpec(name = "ArgParse"),
+        PackageSpec(name = "BifurcationKit"),
+        PackageSpec(name = "CairoMakie"),
+        PackageSpec(name = "Colors"),
+        PackageSpec(name = "DifferentialEquations"),
+        PackageSpec(name = "FFTW"),
+        PackageSpec(name = "ForwardDiff"),
+        PackageSpec(name = "GR"),
+        PackageSpec(name = "Graphs"),
+        PackageSpec(name = "JSON3"),
+        PackageSpec(name = "Parameters"),
+        PackageSpec(name = "Plots"),
+        PackageSpec(name = "ProgressMeter"),
+        PackageSpec(name = "RecipesBase"),
+        PackageSpec(name = "StatsBase"),
+        PackageSpec(name = "YAML"),
+    ]
+    for spec in required
+        try
+            Pkg.add(spec)
+        catch err
+            @error "Failed to add dependency" spec = spec.name exception = err
+            rethrow(err)
+        end
+    end
 end
+
+ensure_general_registry!()
+Pkg.Registry.update()
+ensure_dependencies!()
+Pkg.instantiate()
 Pkg.precompile()'
 
 # ensure common output directories exist
