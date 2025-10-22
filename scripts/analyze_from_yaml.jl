@@ -38,6 +38,11 @@ end
 using .BeliefAnalysisCore.Types: Params, StepHazard, LogisticHazard
 using .BeliefAnalysisCore.Stats: estimate_Vstar, estimate_g, critical_kappa
 
+# Import simulation toolkit for estimating V*, g, and κ*
+using BeliefSim
+using BeliefSim.Types: Params, StepHazard, LogisticHazard
+using BeliefSim.Stats: estimate_Vstar, estimate_g, critical_kappa
+
 # Load YAML
 try
     using YAML
