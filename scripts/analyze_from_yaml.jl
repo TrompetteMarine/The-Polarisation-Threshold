@@ -24,6 +24,19 @@ using StatsBase
 using Logging
 using Printf
 using Dates
+using Base.Threads
+
+# Import only the simulation submodules we need (without triggering BifurcationKit)
+module BeliefAnalysisCore
+    include(joinpath(@__DIR__, "..", "src", "Utils.jl"))
+    include(joinpath(@__DIR__, "..", "src", "Types.jl"))
+    include(joinpath(@__DIR__, "..", "src", "Hazard.jl"))
+    include(joinpath(@__DIR__, "..", "src", "Model.jl"))
+    include(joinpath(@__DIR__, "..", "src", "Stats.jl"))
+end
+
+using .BeliefAnalysisCore.Types: Params, StepHazard, LogisticHazard
+using .BeliefAnalysisCore.Stats: estimate_Vstar, estimate_g, critical_kappa
 
 # Import simulation toolkit for estimating V*, g, and κ*
 using BeliefSim
@@ -50,11 +63,9 @@ end
 
 # Load bifurcation modules
 include(joinpath(@__DIR__, "..", "src", "bifurcation", "model_interface.jl"))
-include(joinpath(@__DIR__, "..", "src", "bifurcation", "simple_continuation.jl"))
 include(joinpath(@__DIR__, "..", "src", "bifurcation", "plotting_cairo.jl"))
 
 using .ModelInterface
-using .SimpleContinuation
 using .PlottingCairo
 
 #═══════════════════════════════════════════════════════════════════════════
@@ -135,8 +146,10 @@ function yaml_to_model_params(cfg::Dict)
 
     κ_star = critical_kappa(p_sim; Vstar=Vstar, g=g_est, N=N, T=T, dt=dt, burn_in=burn_in, seed=seed)
 
-    # Normalize cubic term so that polarization amplitude ~ sqrt(κ - κ*) scaled by V*
-    β = 1.0 / max(Vstar, eps())
+    # Calibrate cubic nonlinearity so that |u₁-u₂|/2 ≈ √((κ-κ*)/κ*) for κ > κ*
+    σ_sq = max(σ^2, eps())
+    prefactor = (2 * λ * Vstar) / σ_sq
+    β = prefactor * max(κ_star, eps())
     p_model = (
         λ=λ,
         σ=σ,
@@ -229,19 +242,22 @@ function classify_attractor(u0::Vector{Float64}, p; tmax=500.0)
         F = ModelInterface.f(u, p)
         du .= F
     end
-    
+
     prob = ODEProblem(ode!, u0, (0.0, tmax), p)
-    
+
     try
         sol = solve(prob, Tsit5(); reltol=1e-6, abstol=1e-6)
         u_final = sol.u[end]
         pol_final = polarization_coordinate(u_final)
 
-        if abs(pol_final) < 0.05
+        amp_ref = ModelInterface.polarization_amplitude(p)
+        tol = amp_ref > 0 ? max(0.02, 0.1 * amp_ref) : 0.02
+
+        if abs(pol_final) < tol
             return 0  # Consensus
-        elseif pol_final > 0.05
+        elseif pol_final > tol
             return 1  # Positive polarization
-        elseif pol_final < -0.05
+        elseif pol_final < -tol
             return -1  # Negative polarization
         else
             return 0
@@ -285,6 +301,49 @@ function compute_lyapunov(f::Function, jac::Function, u0::Vector{Float64}, p;
     return n_steps > 0 ? λ_sum / (n_steps * dt) : 0.0
 end
 
+"""
+Pre-compute equilibrium diagnostics across a κ-grid.
+Returns consensus stability and polarized branch information for plotting.
+"""
+function equilibrium_diagnostics(κ_values::AbstractVector{<:Real}, p_base)
+    κ_vec = collect(float.(κ_values))
+    n = length(κ_vec)
+
+    consensus_max = Vector{Float64}(undef, n)
+    consensus_imag = Vector{Float64}(undef, n)
+    polarized_amp = zeros(Float64, n)
+    polarized_exists = falses(n)
+    polarized_max = fill(NaN, n)
+    polarized_imag = fill(NaN, n)
+
+    for (i, κ) in enumerate(κ_vec)
+        p = ModelInterface.kappa_set(p_base, κ)
+
+        J_cons = ModelInterface.jacobian(zeros(2), p)
+        eig_cons = eigvals(J_cons)
+        consensus_max[i] = maximum(real.(eig_cons))
+        consensus_imag[i] = maximum(abs.(imag.(eig_cons)))
+
+        amp = ModelInterface.polarization_amplitude(p)
+        if amp > 0
+            polarized_exists[i] = true
+            polarized_amp[i] = amp
+            u_pol = [amp, -amp]
+            eig_pol = eigvals(ModelInterface.jacobian(u_pol, p))
+            polarized_max[i] = maximum(real.(eig_pol))
+            polarized_imag[i] = maximum(abs.(imag.(eig_pol)))
+        end
+    end
+
+    return (; κ=κ_vec,
+            consensus_max=consensus_max,
+            consensus_imag=consensus_imag,
+            polarized_amp=polarized_amp,
+            polarized_exists=polarized_exists,
+            polarized_max=polarized_max,
+            polarized_imag=polarized_imag)
+end
+
 #═══════════════════════════════════════════════════════════════════════════
 # PLOTTING FUNCTIONS
 #═══════════════════════════════════════════════════════════════════════════
@@ -294,89 +353,88 @@ Plot 1: Extended bifurcation diagram
 """
 function plot_bifurcation(κ_range, p_base)
     @info "  Computing bifurcation diagram..."
-    
-    u0 = zeros(2)
-    branch = SimpleContinuation.continue_equilibria(
-        ModelInterface.f,
-        ModelInterface.jacobian,
-        u0,
-        p_base,
-        κ_range;
-        tol=1e-10
-    )
-    
+
+    κ_vals = collect(κ_range)
+    diag = equilibrium_diagnostics(κ_vals, p_base)
+    κ_star = getproperty(p_base, :kstar)
+
     fig = Figure(size=(1400, 1000))
-    
-    # Extract data
-    u1_eq = [u[1] for u in branch.equilibria]
-    u2_eq = [u[2] for u in branch.equilibria]
-    mean_eq = (u1_eq .+ u2_eq) ./ 2
-    polarization = 0.5 .* abs.(u1_eq .- u2_eq)
-    
-    stable_mask = [all(real.(λs) .< 0) for λs in branch.eigenvalues]
-    max_real_eig = [maximum(real.(λs)) for λs in branch.eigenvalues]
-    imag_parts = [maximum(abs.(imag.(λs))) for λs in branch.eigenvalues]
-    
+
+    consensus_mean = zeros(length(κ_vals))
+    stable_consensus = diag.consensus_max .< 0
+
+    polarized_mask = diag.polarized_exists .& (.!isnan.(diag.polarized_max))
+    stable_polarized = polarized_mask .& (diag.polarized_max .< 0)
+
     # Panel 1: Mean equilibrium
     ax1 = Axis(fig[1, 1:2];
               xlabel="Coupling strength κ",
               ylabel="Mean belief ⟨u⟩",
               title="Bifurcation Diagram: Consensus → Polarization")
-    
-    lines!(ax1, branch.κ_values[stable_mask], mean_eq[stable_mask];
-          linewidth=3, color=:blue, label="Stable")
-    
-    if any(.!stable_mask)
-        lines!(ax1, branch.κ_values[.!stable_mask], mean_eq[.!stable_mask];
-              linewidth=3, color=:red, linestyle=:dash, label="Unstable")
+
+    if any(stable_consensus)
+        lines!(ax1, κ_vals[stable_consensus], consensus_mean[stable_consensus];
+              linewidth=3, color=:blue, label="Consensus (stable)")
     end
-    
-    # Mark critical point
-    stability_changes = findall(diff(stable_mask) .!= 0)
-    if !isempty(stability_changes)
-        idx = stability_changes[1]
-        vlines!(ax1, [branch.κ_values[idx]]; 
-               color=:green, linestyle=:dash, linewidth=2, label="κ* (bifurcation)")
+    if any(.!stable_consensus)
+        lines!(ax1, κ_vals[.!stable_consensus], consensus_mean[.!stable_consensus];
+              linewidth=3, color=:red, linestyle=:dash, label="Consensus (unstable)")
     end
-    
+
+    vlines!(ax1, [κ_star]; color=:green, linestyle=:dash, linewidth=2,
+            label="κ* = $(round(κ_star, digits=4))")
     axislegend(ax1, position=:lt)
-    
+
     # Panel 2: Stability indicator
     ax2 = Axis(fig[2, 1];
               xlabel="κ",
               ylabel="max Re(λ)",
               title="Stability (negative = stable)")
-    
-    lines!(ax2, branch.κ_values, max_real_eig; linewidth=2, color=:black)
-    hlines!(ax2, [0]; color=:red, linestyle=:dash, linewidth=2)
-    
-    band!(ax2, branch.κ_values, fill(-1, length(max_real_eig)), 
-          min.(max_real_eig, 0); color=(:green, 0.2))
-    band!(ax2, branch.κ_values, zeros(length(max_real_eig)), 
-          max.(max_real_eig, 0); color=(:red, 0.2))
-    
+
+    lines!(ax2, κ_vals, diag.consensus_max; linewidth=2, color=:blue, label="Consensus")
+    if any(polarized_mask)
+        lines!(ax2, κ_vals[polarized_mask], diag.polarized_max[polarized_mask];
+              linewidth=2, color=:orange, label="Polarized")
+    end
+    hlines!(ax2, [0]; color=:black, linestyle=:dash, linewidth=1.5)
+    axislegend(ax2, position=:lt)
+
     # Panel 3: Oscillation frequency
     ax3 = Axis(fig[2, 2];
               xlabel="κ",
-              ylabel="|Im(λ)| (Hz)",
+              ylabel="|Im(λ)|",
               title="Oscillation Frequency")
-    
-    lines!(ax3, branch.κ_values, imag_parts; linewidth=2, color=:purple)
-    
-    # Panel 4: Polarization
+
+    lines!(ax3, κ_vals, diag.consensus_imag; linewidth=2, color=:blue)
+    if any(polarized_mask)
+        lines!(ax3, κ_vals[polarized_mask], diag.polarized_imag[polarized_mask];
+              linewidth=2, color=:orange)
+    end
+
+    # Panel 4: Polarization amplitude
     ax4 = Axis(fig[3, 1:2];
               xlabel="κ",
               ylabel="Polarization |u₁ - u₂|/2",
               title="Opinion Divergence")
-    
-    lines!(ax4, branch.κ_values, polarization; linewidth=2, color=:orange)
-    
-    if !isempty(stability_changes)
-        idx = stability_changes[1]
-        vlines!(ax4, [branch.κ_values[idx]]; 
-               color=:green, linestyle=:dash, linewidth=2)
+
+    lines!(ax4, κ_vals, zeros(length(κ_vals)); color=:gray70, linewidth=1, linestyle=:dash)
+    if any(stable_polarized)
+        lines!(ax4, κ_vals[stable_polarized], diag.polarized_amp[stable_polarized];
+              linewidth=3, color=:orange, label="Polarized (stable)")
+        lines!(ax4, κ_vals[stable_polarized], -diag.polarized_amp[stable_polarized];
+              linewidth=3, color=:orange)
     end
-    
+    if any(polarized_mask .& (.!stable_polarized))
+        mask = polarized_mask .& (.!stable_polarized)
+        lines!(ax4, κ_vals[mask], diag.polarized_amp[mask];
+              linewidth=3, color=:red, linestyle=:dot, label="Polarized (unstable)")
+        lines!(ax4, κ_vals[mask], -diag.polarized_amp[mask];
+              linewidth=3, color=:red, linestyle=:dot)
+    end
+
+    vlines!(ax4, [κ_star]; color=:green, linestyle=:dash, linewidth=2)
+    axislegend(ax4, position=:lt)
+
     return fig
 end
 
@@ -410,24 +468,32 @@ function plot_phase_portraits(κ_values, p_base)
         lines!(ax, [-3, 3], [-3, 3]; 
               color=:gray, linestyle=:dash, linewidth=2)
         
-        # Equilibrium
-        try
-            u_eq = SimpleContinuation.newton_solve(
-                ModelInterface.f, ModelInterface.jacobian, zeros(2), p
-            )
-            
-            J = ModelInterface.jacobian(u_eq, p)
-            λs = eigvals(J)
-            is_stable = all(real.(λs) .< 0)
-            
-            scatter!(ax, [u_eq[1]], [u_eq[2]];
-                    color=is_stable ? :green : :orange,
-                    markersize=15,
-                    marker=is_stable ? :circle : :xcross)
-        catch
+        # Consensus equilibrium
+        u_cons = zeros(2)
+        eig_cons = eigvals(ModelInterface.jacobian(u_cons, p))
+        stable_cons = all(real.(eig_cons) .< 0)
+        scatter!(ax, [u_cons[1]], [u_cons[2]];
+                color=stable_cons ? :green : :orange,
+                markersize=14,
+                marker=stable_cons ? :circle : :xcross,
+                label=stable_cons ? (idx == 1 ? "Consensus" : nothing)
+                                  : (idx == 1 ? "Consensus (unstable)" : nothing))
+
+        # Polarized equilibria
+        pol_idx = 0
+        for u_pol in ModelInterface.polarized_equilibria(p)
+            pol_idx += 1
+            eig_pol = eigvals(ModelInterface.jacobian(u_pol, p))
+            stable_pol = all(real.(eig_pol) .< 0)
+            scatter!(ax, [u_pol[1]], [u_pol[2]];
+                    color=stable_pol ? :red : :purple,
+                    markersize=14,
+                    marker=stable_pol ? :rect : :utriangle,
+                    label=stable_pol ? (pol_idx == 1 ? "Polarized" : nothing)
+                                     : (pol_idx == 1 ? "Polarized (unstable)" : nothing))
         end
     end
-    
+
     return fig
 end
 
@@ -649,93 +715,51 @@ Plot 6: Parameter scan
 function plot_parameter_scan(κ_range, p_base; n_points=150)
     @info "  Computing parameter scan..."
     
-    κ_vals = range(κ_range[1], κ_range[2], length=n_points)
+    κ_vals = collect(range(κ_range[1], κ_range[2], length=n_points))
     κ_star = getproperty(p_base, :kstar)
-    
-    trivial_stable = Float64[]
-    trivial_unstable = Float64[]
-    polarized_stable = Float64[]
-    polarized_unstable = Float64[]
-    
-    trivial_κ_stable = Float64[]
-    trivial_κ_unstable = Float64[]
-    polarized_κ_stable = Float64[]
-    polarized_κ_unstable = Float64[]
-    
-    for κ in κ_vals
-        p = ModelInterface.kappa_set(p_base, κ)
-        
-        # Trivial equilibrium
-        u_trivial = zeros(2)
-        if norm(ModelInterface.f(u_trivial, p)) < 1e-8
-            J = ModelInterface.jacobian(u_trivial, p)
-            λs = eigvals(J)
-            max_re = maximum(real.(λs))
-            
-            if max_re < 0
-                push!(trivial_stable, 0.0)
-                push!(trivial_κ_stable, κ)
-            else
-                push!(trivial_unstable, 0.0)
-                push!(trivial_κ_unstable, κ)
-            end
-        end
-        
-        # Polarized equilibria
-        for u0 in [[0.5, -0.5], [1.0, -1.0]]
-            try
-                u_eq = SimpleContinuation.newton_solve(
-                    ModelInterface.f, ModelInterface.jacobian, u0, p
-                )
-                
-                if norm(ModelInterface.f(u_eq, p)) < 1e-8 && norm(u_eq) > 0.01
-                    J = ModelInterface.jacobian(u_eq, p)
-                    λs = eigvals(J)
-                    max_re = maximum(real.(λs))
-                    
-                    if max_re < 0
-                        push!(polarized_stable, polarization_amplitude(u_eq))
-                        push!(polarized_κ_stable, κ)
-                    else
-                        push!(polarized_unstable, polarization_amplitude(u_eq))
-                        push!(polarized_κ_unstable, κ)
-                    end
-                    break
-                end
-            catch
-                continue
-            end
-        end
-    end
-    
+    diag = equilibrium_diagnostics(κ_vals, p_base)
+
+    consensus_stable_mask = diag.consensus_max .< 0
+    consensus_unstable_mask = .!consensus_stable_mask
+
+    polarized_mask = diag.polarized_exists .& (.!isnan.(diag.polarized_max))
+    polarized_stable_mask = polarized_mask .& (diag.polarized_max .< 0)
+    polarized_unstable_mask = polarized_mask .& (.!polarized_stable_mask)
+
     fig = Figure(size=(1200, 700))
-    
+
     ax = Axis(fig[1, 1];
              xlabel="Coupling κ", ylabel="Polarization |u₁ - u₂|/2",
              title="Bifurcation Structure")
-    
-    if !isempty(trivial_κ_stable)
-        scatter!(ax, trivial_κ_stable, trivial_stable;
-                color=:blue, markersize=3, label="Consensus (stable)")
+
+    if any(consensus_stable_mask)
+        scatter!(ax, κ_vals[consensus_stable_mask], zeros(sum(consensus_stable_mask));
+                color=:blue, markersize=4, label="Consensus (stable)")
     end
-    if !isempty(trivial_κ_unstable)
-        scatter!(ax, trivial_κ_unstable, trivial_unstable;
-                color=:blue, markersize=3, marker=:xcross, alpha=0.5)
+    if any(consensus_unstable_mask)
+        scatter!(ax, κ_vals[consensus_unstable_mask], zeros(sum(consensus_unstable_mask));
+                color=:blue, markersize=4, marker=:xcross, alpha=0.6,
+                label="Consensus (unstable)")
     end
-    if !isempty(polarized_κ_stable)
-        scatter!(ax, polarized_κ_stable, polarized_stable;
-                color=:red, markersize=3, label="Polarized (stable)")
+    if any(polarized_stable_mask)
+        scatter!(ax, κ_vals[polarized_stable_mask], diag.polarized_amp[polarized_stable_mask];
+                color=:red, markersize=4, label="Polarized (stable)")
+        scatter!(ax, κ_vals[polarized_stable_mask], -diag.polarized_amp[polarized_stable_mask];
+                color=:red, markersize=4)
     end
-    if !isempty(polarized_κ_unstable)
-        scatter!(ax, polarized_κ_unstable, polarized_unstable;
-                color=:red, markersize=3, marker=:xcross, alpha=0.5)
+    if any(polarized_unstable_mask)
+        scatter!(ax, κ_vals[polarized_unstable_mask], diag.polarized_amp[polarized_unstable_mask];
+                color=:red, markersize=4, marker=:xcross, alpha=0.6,
+                label="Polarized (unstable)")
+        scatter!(ax, κ_vals[polarized_unstable_mask], -diag.polarized_amp[polarized_unstable_mask];
+                color=:red, markersize=4, marker=:xcross, alpha=0.6)
     end
-    
+
     vlines!(ax, [κ_star]; color=:green, linestyle=:dash, linewidth=3,
-           label="κ* = $(round(κ_star, digits=3))")
-    
+           label="κ* = $(round(κ_star, digits=4))")
+
     axislegend(ax, position=:lt)
-    
+
     return fig
 end
 

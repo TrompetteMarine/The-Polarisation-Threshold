@@ -5,6 +5,7 @@ using ForwardDiff
 using Statistics
 
 export f!, f, default_params, jacobian, kappa_get, kappa_set
+export polarization_amplitude, polarized_equilibria
 
 "Default parameters for deterministic mean-field normal form."
 function default_params()
@@ -84,6 +85,44 @@ function kappa_set(p, κ)
     newp = deepcopy(p)
     Base.setproperty!(newp, :kappa, κ)
     return newp
+end
+
+function polarization_growth(p)
+    hasproperty(p, :λ) || throw(ArgumentError("Parameter object must provide :λ"))
+    hasproperty(p, :σ) || throw(ArgumentError("Parameter object must provide :σ"))
+    hasproperty(p, :Vstar) || throw(ArgumentError("Parameter object must provide :Vstar"))
+    hasproperty(p, :kstar) || throw(ArgumentError("Parameter object must provide :kstar"))
+
+    λ = getproperty(p, :λ)
+    σ = getproperty(p, :σ)
+    Vstar = getproperty(p, :Vstar)
+    κ = kappa_get(p)
+    κ_star = getproperty(p, :kstar)
+    σ_sq = max(abs2(σ), eps())
+
+    prefactor = (2 * λ * Vstar) / σ_sq
+    return prefactor * (κ - κ_star)
+end
+
+function polarization_amplitude(p)
+    growth = polarization_growth(p)
+    β = hasproperty(p, :beta) ? getproperty(p, :beta) : 1.0
+
+    if growth <= 0 || β <= 0
+        return 0.0
+    end
+
+    return sqrt(max(growth / β, 0.0))
+end
+
+function polarized_equilibria(p)
+    amp = polarization_amplitude(p)
+
+    if amp <= 0
+        return Vector{Vector{Float64}}()
+    end
+
+    return [[amp, -amp], [-amp, amp]]
 end
 
 end # module
