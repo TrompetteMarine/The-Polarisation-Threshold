@@ -376,12 +376,14 @@ function equilibrium_diagnostics(κ_values::AbstractVector{<:Real}, p_base)
             polarized_imag=polarized_imag)
 end
 
-function format_ratio_label(κ::Real, κ_star::Real; digits_ratio::Int=2, digits_kappa::Int=3)
+function format_ratio_label(κ::Real, κ_star::Real; digits_ratio::Int=3, digits_kappa::Int=3)
     if isfinite(κ_star) && κ_star > 0
         ratio = κ / κ_star
-        return @sprintf("κ = %.*f (κ/κ* = %.*f)", digits_kappa, κ, digits_ratio, ratio)
+        fmt = Printf.Format("κ = %." * string(digits_kappa) * "f (κ/κ* = %." * string(digits_ratio) * "f)")
+        return Printf.format(fmt, κ, ratio)
     else
-        return @sprintf("κ = %.*f", digits_kappa, κ)
+        fmt = Printf.Format("κ = %." * string(digits_kappa) * "f")
+        return Printf.format(fmt, κ)
     end
 end
 
