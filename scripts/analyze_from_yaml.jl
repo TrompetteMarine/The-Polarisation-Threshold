@@ -24,6 +24,56 @@ using StatsBase
 using Logging
 using Printf
 using Dates
+using Base.Threads
+
+# Import only the simulation submodules we need (without triggering BifurcationKit)
+module BeliefAnalysisCore
+    include(joinpath(@__DIR__, "..", "src", "Utils.jl"))
+    include(joinpath(@__DIR__, "..", "src", "Types.jl"))
+    include(joinpath(@__DIR__, "..", "src", "Hazard.jl"))
+    include(joinpath(@__DIR__, "..", "src", "Model.jl"))
+    include(joinpath(@__DIR__, "..", "src", "Stats.jl"))
+end
+
+"""
+Map requested κ/κ* ratios to κ values inside [κ_min, κ_max].
+Falls back to an evenly spaced grid if κ* <= 0 or if the requested
+ratios do not intersect the interval.
+"""
+function kappa_from_ratios(κ_star::Real, κ_min::Real, κ_max::Real,
+                           ratios::AbstractVector{<:Real}; fallback_count::Int=length(ratios))
+    if !isfinite(κ_star) || κ_star <= 0
+        return collect(range(κ_min, κ_max; length=max(fallback_count, 2)))
+    end
+
+    raw = κ_star .* collect(ratios)
+    span = maximum(abs.([κ_star, κ_min, κ_max]))
+    tol = max(1e-9, 1e-6 * span)
+    mask = (raw .>= κ_min - tol) .& (raw .<= κ_max + tol)
+    selected = sort(unique(raw[mask]))
+
+    if isempty(selected)
+        return collect(range(κ_min, κ_max; length=max(fallback_count, 2)))
+    end
+
+    return selected
+end
+
+function ratio_ticks(κ_min::Real, κ_max::Real, κ_star::Real)
+    if !isfinite(κ_star) || κ_star <= 0
+        return nothing
+    end
+
+    r_min = max(0.0, floor(κ_min / κ_star * 2) / 2)
+    r_max = ceil(max(κ_max / κ_star, 0.0) * 2) / 2
+    ratios = collect(r_min:0.5:r_max)
+    ticks = κ_star .* ratios
+    labels = [string(round(r, digits=2), " κ*") for r in ratios]
+    return (ticks, labels)
+end
+
+using .BeliefAnalysisCore.Types: Params, StepHazard, LogisticHazard
+using .BeliefAnalysisCore.Stats: estimate_Vstar, estimate_g, critical_kappa
 
 # Load YAML
 try
@@ -45,11 +95,9 @@ end
 
 # Load bifurcation modules
 include(joinpath(@__DIR__, "..", "src", "bifurcation", "model_interface.jl"))
-include(joinpath(@__DIR__, "..", "src", "bifurcation", "simple_continuation.jl"))
 include(joinpath(@__DIR__, "..", "src", "bifurcation", "plotting_cairo.jl"))
 
 using .ModelInterface
-using .SimpleContinuation
 using .PlottingCairo
 
 #═══════════════════════════════════════════════════════════════════════════
@@ -91,20 +139,71 @@ Convert YAML parameters to ModelInterface format
 """
 function yaml_to_model_params(cfg::Dict)
     params = cfg["params"]
-    
+
     # Extract core parameters
     λ = Float64(params["lambda"])
     σ = Float64(params["sigma"])
-    
-    # For mean-field 2-agent model:
-    # β represents the reset/noise strength (analogous to σ in the full model)
-    β = σ / λ  # Normalized noise strength
-    
-    # Critical coupling for 2-agent symmetric system
-    # From linear stability: κ* = λ (when mean reversion = coupling)
-    κ_star = λ
-    
-    return (λ=λ, beta=β, kappa=0.0, kstar=κ_star)
+    Θ = Float64(params["theta"])
+    c0 = Float64(params["c0"])
+
+    hazard_cfg = params["hazard"]
+    hazard = begin
+        kind = lowercase(String(hazard_cfg["kind"]))
+        if kind == "step"
+            StepHazard(Float64(hazard_cfg["nu0"]))
+        elseif kind == "logistic"
+            LogisticHazard(Float64(hazard_cfg["numax"]), Float64(hazard_cfg["beta"]))
+        else
+            error("Unsupported hazard kind: $(hazard_cfg["kind"]) — use 'step' or 'logistic'.")
+        end
+    end
+
+    seed = get(cfg, "seed", 0)
+    N = cfg["N"]
+    T = cfg["T"]
+    dt = cfg["dt"]
+    burn_in = cfg["burn_in"]
+
+    p_sim = Params(; λ=λ, σ=σ, Θ=Θ, c0=c0, hazard=hazard)
+
+    @info "  Estimating stationary dispersion V* via Monte Carlo" N=N T=T dt=dt burn_in=burn_in seed=seed
+    Vstar = estimate_Vstar(p_sim; N=N, T=T, dt=dt, burn_in=burn_in, seed=seed)
+
+    @info "  Estimating odd-mode decay g at κ=0"
+    g_est = estimate_g(p_sim;
+                       N=max(N, 20_000),
+                       T=min(max(T, 40.0), 120.0),
+                       dt=min(dt, 0.01),
+                       seed=seed)
+
+    κ_star = critical_kappa(p_sim; Vstar=Vstar, g=g_est, N=N, T=T, dt=dt, burn_in=burn_in, seed=seed)
+
+    # Calibrate cubic nonlinearity so that |u₁-u₂|/2 ≈ √((κ-κ*)/κ*) for κ > κ*
+    σ_sq = max(σ^2, eps())
+    prefactor = (2 * λ * Vstar) / σ_sq
+    β = prefactor * max(κ_star, eps())
+    p_model = (
+        λ=λ,
+        σ=σ,
+        Θ=Θ,
+        c0=c0,
+        Vstar=Vstar,
+        g=g_est,
+        beta=β,
+        kappa=0.0,
+        kstar=κ_star,
+        seed=seed,
+    )
+
+    meta = (
+        params=p_sim,
+        hazard=hazard,
+        Vstar=Vstar,
+        g=g_est,
+        κ_star=κ_star,
+    )
+
+    return p_model, meta
 end
 
 #═══════════════════════════════════════════════════════════════════════════
@@ -160,6 +259,14 @@ function compute_psd(x::Vector{Float64}, dt::Float64)
 end
 
 """
+Order parameter for polarization: half the difference between the two agents.
+Falls back to mean if dimensionality ≠ 2.
+"""
+polarization_coordinate(u::AbstractVector) = length(u) == 2 ? 0.5 * (u[1] - u[2]) : mean(u)
+
+polarization_amplitude(u::AbstractVector) = abs(polarization_coordinate(u))
+
+"""
 Classify attractor by running trajectory
 """
 function classify_attractor(u0::Vector{Float64}, p; tmax=500.0)
@@ -167,19 +274,22 @@ function classify_attractor(u0::Vector{Float64}, p; tmax=500.0)
         F = ModelInterface.f(u, p)
         du .= F
     end
-    
+
     prob = ODEProblem(ode!, u0, (0.0, tmax), p)
-    
+
     try
         sol = solve(prob, Tsit5(); reltol=1e-6, abstol=1e-6)
         u_final = sol.u[end]
-        mean_final = mean(u_final)
-        
-        if abs(mean_final) < 0.1
+        pol_final = polarization_coordinate(u_final)
+
+        amp_ref = ModelInterface.polarization_amplitude(p)
+        tol = amp_ref > 0 ? max(0.02, 0.1 * amp_ref) : 0.02
+
+        if abs(pol_final) < tol
             return 0  # Consensus
-        elseif mean_final > 0.1
+        elseif pol_final > tol
             return 1  # Positive polarization
-        elseif mean_final < -0.1
+        elseif pol_final < -tol
             return -1  # Negative polarization
         else
             return 0
@@ -223,6 +333,58 @@ function compute_lyapunov(f::Function, jac::Function, u0::Vector{Float64}, p;
     return n_steps > 0 ? λ_sum / (n_steps * dt) : 0.0
 end
 
+"""
+Pre-compute equilibrium diagnostics across a κ-grid.
+Returns consensus stability and polarized branch information for plotting.
+"""
+function equilibrium_diagnostics(κ_values::AbstractVector{<:Real}, p_base)
+    κ_vec = collect(float.(κ_values))
+    n = length(κ_vec)
+
+    consensus_max = Vector{Float64}(undef, n)
+    consensus_imag = Vector{Float64}(undef, n)
+    polarized_amp = zeros(Float64, n)
+    polarized_exists = falses(n)
+    polarized_max = fill(NaN, n)
+    polarized_imag = fill(NaN, n)
+
+    for (i, κ) in enumerate(κ_vec)
+        p = ModelInterface.kappa_set(p_base, κ)
+
+        J_cons = ModelInterface.jacobian(zeros(2), p)
+        eig_cons = eigvals(J_cons)
+        consensus_max[i] = maximum(real.(eig_cons))
+        consensus_imag[i] = maximum(abs.(imag.(eig_cons)))
+
+        amp = ModelInterface.polarization_amplitude(p)
+        if amp > 0
+            polarized_exists[i] = true
+            polarized_amp[i] = amp
+            u_pol = [amp, -amp]
+            eig_pol = eigvals(ModelInterface.jacobian(u_pol, p))
+            polarized_max[i] = maximum(real.(eig_pol))
+            polarized_imag[i] = maximum(abs.(imag.(eig_pol)))
+        end
+    end
+
+    return (; κ=κ_vec,
+            consensus_max=consensus_max,
+            consensus_imag=consensus_imag,
+            polarized_amp=polarized_amp,
+            polarized_exists=polarized_exists,
+            polarized_max=polarized_max,
+            polarized_imag=polarized_imag)
+end
+
+function format_ratio_label(κ::Real, κ_star::Real; digits_ratio::Int=2, digits_kappa::Int=3)
+    if isfinite(κ_star) && κ_star > 0
+        ratio = κ / κ_star
+        return @sprintf("κ = %.*f (κ/κ* = %.*f)", digits_kappa, κ, digits_ratio, ratio)
+    else
+        return @sprintf("κ = %.*f", digits_kappa, κ)
+    end
+end
+
 #═══════════════════════════════════════════════════════════════════════════
 # PLOTTING FUNCTIONS
 #═══════════════════════════════════════════════════════════════════════════
@@ -232,89 +394,92 @@ Plot 1: Extended bifurcation diagram
 """
 function plot_bifurcation(κ_range, p_base)
     @info "  Computing bifurcation diagram..."
-    
-    u0 = zeros(2)
-    branch = SimpleContinuation.continue_equilibria(
-        ModelInterface.f,
-        ModelInterface.jacobian,
-        u0,
-        p_base,
-        κ_range;
-        tol=1e-10
-    )
-    
+
+    κ_vals = collect(κ_range)
+    diag = equilibrium_diagnostics(κ_vals, p_base)
+    κ_star = getproperty(p_base, :kstar)
+
     fig = Figure(size=(1400, 1000))
-    
-    # Extract data
-    u1_eq = [u[1] for u in branch.equilibria]
-    u2_eq = [u[2] for u in branch.equilibria]
-    mean_eq = (u1_eq .+ u2_eq) ./ 2
-    polarization = abs.(u1_eq .- u2_eq)
-    
-    stable_mask = [all(real.(λs) .< 0) for λs in branch.eigenvalues]
-    max_real_eig = [maximum(real.(λs)) for λs in branch.eigenvalues]
-    imag_parts = [maximum(abs.(imag.(λs))) for λs in branch.eigenvalues]
-    
+
+    consensus_mean = zeros(length(κ_vals))
+    stable_consensus = diag.consensus_max .< 0
+
+    polarized_mask = diag.polarized_exists .& (.!isnan.(diag.polarized_max))
+    stable_polarized = polarized_mask .& (diag.polarized_max .< 0)
+
     # Panel 1: Mean equilibrium
     ax1 = Axis(fig[1, 1:2];
               xlabel="Coupling strength κ",
               ylabel="Mean belief ⟨u⟩",
               title="Bifurcation Diagram: Consensus → Polarization")
-    
-    lines!(ax1, branch.κ_values[stable_mask], mean_eq[stable_mask];
-          linewidth=3, color=:blue, label="Stable")
-    
-    if any(.!stable_mask)
-        lines!(ax1, branch.κ_values[.!stable_mask], mean_eq[.!stable_mask];
-              linewidth=3, color=:red, linestyle=:dash, label="Unstable")
+
+    if any(stable_consensus)
+        lines!(ax1, κ_vals[stable_consensus], consensus_mean[stable_consensus];
+              linewidth=3, color=:blue, label="Consensus (stable)")
     end
-    
-    # Mark critical point
-    stability_changes = findall(diff(stable_mask) .!= 0)
-    if !isempty(stability_changes)
-        idx = stability_changes[1]
-        vlines!(ax1, [branch.κ_values[idx]]; 
-               color=:green, linestyle=:dash, linewidth=2, label="κ* (bifurcation)")
+    if any(.!stable_consensus)
+        lines!(ax1, κ_vals[.!stable_consensus], consensus_mean[.!stable_consensus];
+              linewidth=3, color=:red, linestyle=:dash, label="Consensus (unstable)")
     end
-    
+
+    vlines!(ax1, [κ_star]; color=:green, linestyle=:dash, linewidth=2,
+            label="κ* = $(round(κ_star, digits=4))")
+    ticks_main = ratio_ticks(minimum(κ_vals), maximum(κ_vals), κ_star)
+    ticks_main === nothing || (ax1.xticks = ticks_main)
     axislegend(ax1, position=:lt)
-    
+
     # Panel 2: Stability indicator
     ax2 = Axis(fig[2, 1];
               xlabel="κ",
               ylabel="max Re(λ)",
               title="Stability (negative = stable)")
-    
-    lines!(ax2, branch.κ_values, max_real_eig; linewidth=2, color=:black)
-    hlines!(ax2, [0]; color=:red, linestyle=:dash, linewidth=2)
-    
-    band!(ax2, branch.κ_values, fill(-1, length(max_real_eig)), 
-          min.(max_real_eig, 0); color=(:green, 0.2))
-    band!(ax2, branch.κ_values, zeros(length(max_real_eig)), 
-          max.(max_real_eig, 0); color=(:red, 0.2))
-    
+
+    lines!(ax2, κ_vals, diag.consensus_max; linewidth=2, color=:blue, label="Consensus")
+    if any(polarized_mask)
+        lines!(ax2, κ_vals[polarized_mask], diag.polarized_max[polarized_mask];
+              linewidth=2, color=:orange, label="Polarized")
+    end
+    hlines!(ax2, [0]; color=:black, linestyle=:dash, linewidth=1.5)
+    axislegend(ax2, position=:lt)
+
     # Panel 3: Oscillation frequency
     ax3 = Axis(fig[2, 2];
               xlabel="κ",
-              ylabel="|Im(λ)| (Hz)",
+              ylabel="|Im(λ)|",
               title="Oscillation Frequency")
-    
-    lines!(ax3, branch.κ_values, imag_parts; linewidth=2, color=:purple)
-    
-    # Panel 4: Polarization
+
+    lines!(ax3, κ_vals, diag.consensus_imag; linewidth=2, color=:blue)
+    if any(polarized_mask)
+        lines!(ax3, κ_vals[polarized_mask], diag.polarized_imag[polarized_mask];
+              linewidth=2, color=:orange)
+    end
+
+    # Panel 4: Polarization amplitude
     ax4 = Axis(fig[3, 1:2];
               xlabel="κ",
-              ylabel="Polarization |u₁ - u₂|",
+              ylabel="Polarization |u₁ - u₂|/2",
               title="Opinion Divergence")
-    
-    lines!(ax4, branch.κ_values, polarization; linewidth=2, color=:orange)
-    
-    if !isempty(stability_changes)
-        idx = stability_changes[1]
-        vlines!(ax4, [branch.κ_values[idx]]; 
-               color=:green, linestyle=:dash, linewidth=2)
+
+    lines!(ax4, κ_vals, zeros(length(κ_vals)); color=:gray70, linewidth=1, linestyle=:dash)
+    if any(stable_polarized)
+        lines!(ax4, κ_vals[stable_polarized], diag.polarized_amp[stable_polarized];
+              linewidth=3, color=:orange, label="Polarized (stable)")
+        lines!(ax4, κ_vals[stable_polarized], -diag.polarized_amp[stable_polarized];
+              linewidth=3, color=:orange)
     end
-    
+    if any(polarized_mask .& (.!stable_polarized))
+        mask = polarized_mask .& (.!stable_polarized)
+        lines!(ax4, κ_vals[mask], diag.polarized_amp[mask];
+              linewidth=3, color=:red, linestyle=:dot, label="Polarized (unstable)")
+        lines!(ax4, κ_vals[mask], -diag.polarized_amp[mask];
+              linewidth=3, color=:red, linestyle=:dot)
+    end
+
+    vlines!(ax4, [κ_star]; color=:green, linestyle=:dash, linewidth=2)
+    ticks_div = ratio_ticks(minimum(κ_vals), maximum(κ_vals), κ_star)
+    ticks_div === nothing || (ax4.xticks = ticks_div)
+    axislegend(ax4, position=:lt)
+
     return fig
 end
 
@@ -333,10 +498,12 @@ function plot_phase_portraits(κ_values, p_base)
         row = div(idx - 1, 2) + 1
         col = mod(idx - 1, 2) + 1
         
+        κ_star = getproperty(p, :kstar)
+        title_str = "Phase Space: " * format_ratio_label(κ, κ_star)
         ax = Axis(fig[row, col];
                  xlabel="u₁ (agent 1)",
                  ylabel="u₂ (agent 2)",
-                 title="Phase Space: κ = $(round(κ, digits=3))",
+                 title=title_str,
                  aspect=DataAspect())
         
         # Vector field
@@ -348,24 +515,32 @@ function plot_phase_portraits(κ_values, p_base)
         lines!(ax, [-3, 3], [-3, 3]; 
               color=:gray, linestyle=:dash, linewidth=2)
         
-        # Equilibrium
-        try
-            u_eq = SimpleContinuation.newton_solve(
-                ModelInterface.f, ModelInterface.jacobian, zeros(2), p
-            )
-            
-            J = ModelInterface.jacobian(u_eq, p)
-            λs = eigvals(J)
-            is_stable = all(real.(λs) .< 0)
-            
-            scatter!(ax, [u_eq[1]], [u_eq[2]];
-                    color=is_stable ? :green : :orange,
-                    markersize=15,
-                    marker=is_stable ? :circle : :xcross)
-        catch
+        # Consensus equilibrium
+        u_cons = zeros(2)
+        eig_cons = eigvals(ModelInterface.jacobian(u_cons, p))
+        stable_cons = all(real.(eig_cons) .< 0)
+        scatter!(ax, [u_cons[1]], [u_cons[2]];
+                color=stable_cons ? :green : :orange,
+                markersize=14,
+                marker=stable_cons ? :circle : :xcross,
+                label=stable_cons ? (idx == 1 ? "Consensus" : nothing)
+                                  : (idx == 1 ? "Consensus (unstable)" : nothing))
+
+        # Polarized equilibria
+        pol_idx = 0
+        for u_pol in ModelInterface.polarized_equilibria(p)
+            pol_idx += 1
+            eig_pol = eigvals(ModelInterface.jacobian(u_pol, p))
+            stable_pol = all(real.(eig_pol) .< 0)
+            scatter!(ax, [u_pol[1]], [u_pol[2]];
+                    color=stable_pol ? :red : :purple,
+                    markersize=14,
+                    marker=stable_pol ? :rect : :utriangle,
+                    label=stable_pol ? (pol_idx == 1 ? "Polarized" : nothing)
+                                     : (pol_idx == 1 ? "Polarized (unstable)" : nothing))
         end
     end
-    
+
     return fig
 end
 
@@ -387,10 +562,11 @@ function plot_basins(κ_values, p_base; resolution=50)
         row = div(idx - 1, 2) + 1
         col = mod(idx - 1, 2) + 1
         
+        κ_star = getproperty(p, :kstar)
         ax = Axis(fig[row, col];
                  xlabel="Initial u₁",
                  ylabel="Initial u₂",
-                 title="Basin: κ=$(round(κ, digits=3))",
+                 title="Basin: " * format_ratio_label(κ, κ_star),
                  aspect=DataAspect())
         
         basin_map = zeros(resolution, resolution)
@@ -437,13 +613,16 @@ function plot_timeseries(κ, p_base; u0=[0.5, -0.5], tmax=500.0, dt=0.1)
     traj = reduce(hcat, sol.u)
     u1, u2 = traj[1, :], traj[2, :]
     mean_traj = (u1 .+ u2) ./ 2
+    pol_traj = 0.5 .* (u1 .- u2)
     
     fig = Figure(size=(1600, 1200))
-    
+
+    label_ratio = format_ratio_label(κ, getproperty(p, :kstar); digits_ratio=3)
+
     # Panel 1: Time series
     ax1 = Axis(fig[1, 1:2];
               xlabel="Time", ylabel="Belief",
-              title="Evolution: κ=$(round(κ, digits=3))")
+              title="Evolution: " * label_ratio)
     
     lines!(ax1, t, u1; linewidth=1.5, color=:blue, label="Agent 1")
     lines!(ax1, t, u2; linewidth=1.5, color=:red, label="Agent 2")
@@ -452,10 +631,10 @@ function plot_timeseries(κ, p_base; u0=[0.5, -0.5], tmax=500.0, dt=0.1)
     axislegend(ax1, position=:rt)
     
     # Panel 2: Polarization
-    ax2 = Axis(fig[2, 1]; xlabel="Time", ylabel="|u₁ - u₂|",
+    ax2 = Axis(fig[2, 1]; xlabel="Time", ylabel="|u₁ - u₂|/2",
               title="Polarization")
-    
-    polarization = abs.(u1 .- u2)
+
+    polarization = abs.(pol_traj)
     lines!(ax2, t, polarization; linewidth=1.5, color=:purple)
     
     # Panel 3: Distance from origin
@@ -469,8 +648,8 @@ function plot_timeseries(κ, p_base; u0=[0.5, -0.5], tmax=500.0, dt=0.1)
     ax4 = Axis(fig[3, 1]; xlabel="Lag", ylabel="ACF",
               title="Autocorrelation")
     
-    max_lag = min(500, length(mean_traj) ÷ 4)
-    acf = autocorrelation(mean_traj, max_lag)
+    max_lag = min(500, length(pol_traj) ÷ 4)
+    acf = autocorrelation(pol_traj, max_lag)
     lines!(ax4, (0:max_lag) .* dt, acf; linewidth=2, color=:blue)
     hlines!(ax4, [0]; color=:black, linestyle=:dash, linewidth=1)
     
@@ -478,7 +657,7 @@ function plot_timeseries(κ, p_base; u0=[0.5, -0.5], tmax=500.0, dt=0.1)
     ax5 = Axis(fig[3, 2]; xlabel="Frequency", ylabel="Power",
               title="Spectrum", xscale=log10, yscale=log10)
     
-    freqs, psd = compute_psd(mean_traj, dt)
+    freqs, psd = compute_psd(pol_traj, dt)
     valid = (freqs .> 0) .& (psd .> 1e-12)
     lines!(ax5, freqs[valid], psd[valid]; linewidth=2, color=:blue)
     
@@ -539,9 +718,10 @@ function plot_return_maps(κ_values, p_base)
             traj = reduce(hcat, sol.u)
             u1 = traj[1, :]
             
+            label_ratio = format_ratio_label(κ, getproperty(p, :kstar); digits_ratio=3, digits_kappa=2)
             ax = Axis(fig[κ_idx, s_idx];
                      xlabel="u₁(t)", ylabel="u₁(t+τ)",
-                     title="κ=$(round(κ, digits=2)) - $(scen.name)",
+                     title=label_ratio * " — $(scen.name)",
                      aspect=DataAspect())
             
             if var(u1) < 1e-6
@@ -586,93 +766,54 @@ Plot 6: Parameter scan
 function plot_parameter_scan(κ_range, p_base; n_points=150)
     @info "  Computing parameter scan..."
     
-    κ_vals = range(κ_range[1], κ_range[2], length=n_points)
+    κ_vals = collect(range(κ_range[1], κ_range[2], length=n_points))
     κ_star = getproperty(p_base, :kstar)
-    
-    trivial_stable = Float64[]
-    trivial_unstable = Float64[]
-    polarized_stable = Float64[]
-    polarized_unstable = Float64[]
-    
-    trivial_κ_stable = Float64[]
-    trivial_κ_unstable = Float64[]
-    polarized_κ_stable = Float64[]
-    polarized_κ_unstable = Float64[]
-    
-    for κ in κ_vals
-        p = ModelInterface.kappa_set(p_base, κ)
-        
-        # Trivial equilibrium
-        u_trivial = zeros(2)
-        if norm(ModelInterface.f(u_trivial, p)) < 1e-8
-            J = ModelInterface.jacobian(u_trivial, p)
-            λs = eigvals(J)
-            max_re = maximum(real.(λs))
-            
-            if max_re < 0
-                push!(trivial_stable, 0.0)
-                push!(trivial_κ_stable, κ)
-            else
-                push!(trivial_unstable, 0.0)
-                push!(trivial_κ_unstable, κ)
-            end
-        end
-        
-        # Polarized equilibria
-        for u0 in [[0.5, -0.5], [1.0, -1.0]]
-            try
-                u_eq = SimpleContinuation.newton_solve(
-                    ModelInterface.f, ModelInterface.jacobian, u0, p
-                )
-                
-                if norm(ModelInterface.f(u_eq, p)) < 1e-8 && norm(u_eq) > 0.01
-                    J = ModelInterface.jacobian(u_eq, p)
-                    λs = eigvals(J)
-                    max_re = maximum(real.(λs))
-                    
-                    if max_re < 0
-                        push!(polarized_stable, abs(mean(u_eq)))
-                        push!(polarized_κ_stable, κ)
-                    else
-                        push!(polarized_unstable, abs(mean(u_eq)))
-                        push!(polarized_κ_unstable, κ)
-                    end
-                    break
-                end
-            catch
-                continue
-            end
-        end
-    end
-    
-    fig = Figure(size=(1200, 700))
-    
+    diag = equilibrium_diagnostics(κ_vals, p_base)
+
+    consensus_stable_mask = diag.consensus_max .< 0
+    consensus_unstable_mask = .!consensus_stable_mask
+
+    polarized_mask = diag.polarized_exists .& (.!isnan.(diag.polarized_max))
+    polarized_stable_mask = polarized_mask .& (diag.polarized_max .< 0)
+    polarized_unstable_mask = polarized_mask .& (.!polarized_stable_mask)
+
+    fig = Figure(size=(1200, 720))
+
     ax = Axis(fig[1, 1];
-             xlabel="Coupling κ", ylabel="|⟨u⟩|",
+             xlabel="Coupling κ", ylabel="Polarization |u₁ - u₂|/2",
              title="Bifurcation Structure")
-    
-    if !isempty(trivial_κ_stable)
-        scatter!(ax, trivial_κ_stable, trivial_stable;
-                color=:blue, markersize=3, label="Consensus (stable)")
+
+    if any(consensus_stable_mask)
+        lines!(ax, κ_vals[consensus_stable_mask], zeros(sum(consensus_stable_mask));
+               color=:steelblue, linewidth=3, label="Consensus (stable)")
     end
-    if !isempty(trivial_κ_unstable)
-        scatter!(ax, trivial_κ_unstable, trivial_unstable;
-                color=:blue, markersize=3, marker=:xcross, alpha=0.5)
+    if any(consensus_unstable_mask)
+        lines!(ax, κ_vals[consensus_unstable_mask], zeros(sum(consensus_unstable_mask));
+               color=:steelblue, linewidth=3, linestyle=:dash,
+               label="Consensus (unstable)")
     end
-    if !isempty(polarized_κ_stable)
-        scatter!(ax, polarized_κ_stable, polarized_stable;
-                color=:red, markersize=3, label="Polarized (stable)")
+    if any(polarized_stable_mask)
+        lines!(ax, κ_vals[polarized_stable_mask], diag.polarized_amp[polarized_stable_mask];
+               color=:firebrick, linewidth=3, label="Polarized (stable)")
+        lines!(ax, κ_vals[polarized_stable_mask], -diag.polarized_amp[polarized_stable_mask];
+               color=:firebrick, linewidth=3)
     end
-    if !isempty(polarized_κ_unstable)
-        scatter!(ax, polarized_κ_unstable, polarized_unstable;
-                color=:red, markersize=3, marker=:xcross, alpha=0.5)
+    if any(polarized_unstable_mask)
+        lines!(ax, κ_vals[polarized_unstable_mask], diag.polarized_amp[polarized_unstable_mask];
+               color=:darkorange, linewidth=3, linestyle=:dot,
+               label="Polarized (unstable)")
+        lines!(ax, κ_vals[polarized_unstable_mask], -diag.polarized_amp[polarized_unstable_mask];
+               color=:darkorange, linewidth=3, linestyle=:dot)
     end
-    
-    vlines!(ax, [κ_star]; color=:green, linestyle=:dash, linewidth=3,
-           label="κ* = $(round(κ_star, digits=3))")
-    
+
+    vlines!(ax, [κ_star]; color=:seagreen, linestyle=:dash, linewidth=3,
+           label="κ* = $(round(κ_star, digits=4))")
+
+    ticks = ratio_ticks(minimum(κ_vals), maximum(κ_vals), κ_star)
+    ticks === nothing || (ax.xticks = ticks)
+
     axislegend(ax, position=:lt)
-    
+
     return fig
 end
 
@@ -715,6 +856,10 @@ function plot_lyapunov(κ_range, p_base; tmax=2000.0)
           min.(lyap_values, 0); color=(:green, 0.2))
     band!(ax, κ_vals, zeros(length(lyap_values)),
           max.(lyap_values, 0); color=(:red, 0.2))
+
+    κ_star = getproperty(p_base, :kstar)
+    ticks = ratio_ticks(minimum(κ_vals), maximum(κ_vals), κ_star)
+    ticks === nothing || (ax.xticks = ticks)
     
     return fig
 end
@@ -731,12 +876,13 @@ function analyze_config(config_path::String)
     @info "  Comprehensive Analysis from YAML"
     @info "═══════════════════════════════════════════════════════════════"
     @info "Config: $config_path"
+
     @info ""
-    
+
     # Load configuration
     cfg = load_yaml_config(config_path)
     config_name = get(cfg, "name", splitext(basename(config_path))[1])
-    
+
     @info "Configuration: $config_name"
     @info "  λ = $(cfg["params"]["lambda"])"
     @info "  σ = $(cfg["params"]["sigma"])"
@@ -745,26 +891,51 @@ function analyze_config(config_path::String)
     @info ""
     
     # Convert to model parameters
-    p_base = yaml_to_model_params(cfg)
+    p_base, meta = yaml_to_model_params(cfg)
     κ_star = getproperty(p_base, :kstar)
-    
+
+    results = Dict{String, String}()
+    results["kappa_star"] = string(κ_star)
+    results["Vstar"] = string(p_base.Vstar)
+    results["g"] = string(p_base.g)
+
     @info "Model parameters:"
     @info "  λ = $(p_base.λ)"
+    @info "  σ = $(p_base.σ)"
+    @info "  V* ≈ $(round(p_base.Vstar, digits=5))"
+    @info "  g ≈ $(round(p_base.g, digits=5))"
     @info "  β = $(p_base.beta)"
-    @info "  κ* = $(round(κ_star, digits=4))"
+    @info "  κ* (theory) = $(round(κ_star, digits=5))"
     @info ""
     
     # Determine κ range
     if haskey(cfg, "sweep")
-        κ_min = cfg["sweep"]["kappa_from"]
-        κ_max = κ_star * cfg["sweep"]["kappa_to_factor_of_kstar"]
-        n_points = cfg["sweep"]["points"]
+        sweep_cfg = cfg["sweep"]
+        n_points = get(sweep_cfg, "points", 121)
+
+        if haskey(sweep_cfg, "kappa_from_factor_of_kstar") && isfinite(κ_star) && κ_star > 0
+            κ_min = κ_star * Float64(sweep_cfg["kappa_from_factor_of_kstar"])
+        else
+            κ_min = Float64(get(sweep_cfg, "kappa_from", max(0.0, 0.5 * κ_star)))
+        end
+
+        if haskey(sweep_cfg, "kappa_to")
+            κ_max = Float64(sweep_cfg["kappa_to"])
+        else
+            factor = Float64(get(sweep_cfg, "kappa_to_factor_of_kstar", 3.0))
+            κ_max = (isfinite(κ_star) && κ_star > 0) ? κ_star * factor : κ_min + max(abs(κ_min), 1.0)
+        end
     else
-        κ_min = 0.6 * κ_star
-        κ_max = 1.5 * κ_star
-        n_points = 100
+        κ_min = max(0.0, 0.4 * κ_star)
+        κ_max = (isfinite(κ_star) && κ_star > 0) ? 2.5 * κ_star : κ_min + 1.0
+        n_points = 121
     end
-    
+
+    if κ_max <= κ_min
+        bump = max(abs(κ_star) * 0.25, 1e-3)
+        κ_max = κ_min + bump
+    end
+
     @info "Analysis range: κ ∈ [$(round(κ_min, digits=3)), $(round(κ_max, digits=3))]"
     @info ""
     
@@ -778,11 +949,9 @@ function analyze_config(config_path::String)
     PlottingCairo.set_theme_elegant!()
     
     # Generate plots
-    κ_range_fine = range(κ_min, κ_max, length=n_points)
-    κ_range_coarse = range(κ_min, κ_max, length=max(20, div(n_points, 5)))
-    κ_selected = [0.85*κ_star, 0.95*κ_star, 1.05*κ_star, 1.15*κ_star]
-    
-    results = Dict{String, String}()
+    κ_range_fine = range(κ_min, κ_max; length=n_points)
+    κ_range_coarse = range(κ_min, κ_max; length=max(20, div(n_points, 5)))
+    κ_selected = kappa_from_ratios(κ_star, κ_min, κ_max, [0.5, 0.9, 1.1, 1.6]; fallback_count=4)
     
     # Plot 1: Bifurcation
     try
@@ -811,7 +980,7 @@ function analyze_config(config_path::String)
     # Plot 3: Basins
     try
         @info "Generating Plot 3: Basins of attraction"
-        κ_basin = [0.9*κ_star, 1.0*κ_star, 1.1*κ_star, 1.2*κ_star]
+        κ_basin = kappa_from_ratios(κ_star, κ_min, κ_max, [0.6, 0.9, 1.1, 1.5]; fallback_count=4)
         fig = plot_basins(κ_basin, p_base; resolution=40)
         filename = "03_basins.png"
         save(joinpath(outdir, filename), fig)
@@ -827,10 +996,11 @@ function analyze_config(config_path::String)
         dt = cfg["dt"]
         T = min(cfg["T"], 500.0)
         
-        for κ_factor in [0.95, 1.05, 1.15]
-            κ = κ_factor * κ_star
+        κ_times = kappa_from_ratios(κ_star, κ_min, κ_max, [0.75, 1.05, 1.4]; fallback_count=3)
+        for κ in κ_times
             fig = plot_timeseries(κ, p_base; tmax=T, dt=dt)
-            filename = "04_timeseries_k$(round(κ_factor, digits=2)).png"
+            ratio_tag = isfinite(κ_star) && κ_star > 0 ? @sprintf("%0.2f", κ / κ_star) : @sprintf("%0.2f", κ)
+            filename = "04_timeseries_ratio_$(replace(ratio_tag, "." => "p")).png"
             save(joinpath(outdir, filename), fig)
         end
         results["timeseries"] = "04_timeseries_*.png"
@@ -842,7 +1012,7 @@ function analyze_config(config_path::String)
     # Plot 5: Return maps
     try
         @info "Generating Plot 5: Return maps"
-        κ_return = [0.95*κ_star, 1.05*κ_star, 1.15*κ_star]
+        κ_return = kappa_from_ratios(κ_star, κ_min, κ_max, [0.8, 1.05, 1.4]; fallback_count=3)
         fig = plot_return_maps(κ_return, p_base)
         filename = "05_return_maps.png"
         save(joinpath(outdir, filename), fig)
@@ -892,14 +1062,26 @@ function analyze_config(config_path::String)
         println(io, "  Θ = $(cfg["params"]["theta"])")
         println(io, "  c₀ = $(cfg["params"]["c0"])")
         println(io, "")
-        println(io, "Model:")
+        println(io, "Model (normal form calibration):")
         println(io, "  λ = $(p_base.λ)")
+        println(io, "  σ = $(p_base.σ)")
+        println(io, "  Θ = $(p_base.Θ)")
+        println(io, "  c₀ = $(p_base.c0)")
+        println(io, "  Hazard = $(meta.hazard)")
+        println(io, "  V* ≈ $(round(p_base.Vstar, digits=6))")
+        println(io, "  g ≈ $(round(p_base.g, digits=6))")
         println(io, "  β = $(p_base.beta)")
-        println(io, "  κ* = $(round(κ_star, digits=4))")
+        println(io, "  κ* = $(round(κ_star, digits=6))")
+        println(io, "  Theory: κ* = g σ² / (2 λ V*)")
+        theory_val = p_base.g * p_base.σ^2 / (2 * p_base.λ * p_base.Vstar)
+        println(io, "         = $(round(theory_val, digits=6)) (numerical check)")
         println(io, "")
         println(io, "Analysis Range:")
         println(io, "  κ ∈ [$(round(κ_min, digits=3)), $(round(κ_max, digits=3))]")
         println(io, "  Points: $n_points")
+        if isfinite(κ_star) && κ_star > 0
+            println(io, "  κ/κ* ∈ [$(round(κ_min/κ_star, digits=3)), $(round(κ_max/κ_star, digits=3))]")
+        end
         println(io, "")
         println(io, "Generated Plots:")
         for (key, file) in sort(collect(results))
