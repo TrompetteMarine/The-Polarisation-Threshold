@@ -35,13 +35,45 @@ module BeliefAnalysisCore
     include(joinpath(@__DIR__, "..", "src", "Stats.jl"))
 end
 
+"""
+Map requested κ/κ* ratios to κ values inside [κ_min, κ_max].
+Falls back to an evenly spaced grid if κ* <= 0 or if the requested
+ratios do not intersect the interval.
+"""
+function kappa_from_ratios(κ_star::Real, κ_min::Real, κ_max::Real,
+                           ratios::AbstractVector{<:Real}; fallback_count::Int=length(ratios))
+    if !isfinite(κ_star) || κ_star <= 0
+        return collect(range(κ_min, κ_max; length=max(fallback_count, 2)))
+    end
+
+    raw = κ_star .* collect(ratios)
+    span = maximum(abs.([κ_star, κ_min, κ_max]))
+    tol = max(1e-9, 1e-6 * span)
+    mask = (raw .>= κ_min - tol) .& (raw .<= κ_max + tol)
+    selected = sort(unique(raw[mask]))
+
+    if isempty(selected)
+        return collect(range(κ_min, κ_max; length=max(fallback_count, 2)))
+    end
+
+    return selected
+end
+
+function ratio_ticks(κ_min::Real, κ_max::Real, κ_star::Real)
+    if !isfinite(κ_star) || κ_star <= 0
+        return nothing
+    end
+
+    r_min = max(0.0, floor(κ_min / κ_star * 2) / 2)
+    r_max = ceil(max(κ_max / κ_star, 0.0) * 2) / 2
+    ratios = collect(r_min:0.5:r_max)
+    ticks = κ_star .* ratios
+    labels = [string(round(r, digits=2), " κ*") for r in ratios]
+    return (ticks, labels)
+end
+
 using .BeliefAnalysisCore.Types: Params, StepHazard, LogisticHazard
 using .BeliefAnalysisCore.Stats: estimate_Vstar, estimate_g, critical_kappa
-
-# Import simulation toolkit for estimating V*, g, and κ*
-using BeliefSim
-using BeliefSim.Types: Params, StepHazard, LogisticHazard
-using BeliefSim.Stats: estimate_Vstar, estimate_g, critical_kappa
 
 # Load YAML
 try
@@ -344,6 +376,15 @@ function equilibrium_diagnostics(κ_values::AbstractVector{<:Real}, p_base)
             polarized_imag=polarized_imag)
 end
 
+function format_ratio_label(κ::Real, κ_star::Real; digits_ratio::Int=2, digits_kappa::Int=3)
+    if isfinite(κ_star) && κ_star > 0
+        ratio = κ / κ_star
+        return @sprintf("κ = %.*f (κ/κ* = %.*f)", digits_kappa, κ, digits_ratio, ratio)
+    else
+        return @sprintf("κ = %.*f", digits_kappa, κ)
+    end
+end
+
 #═══════════════════════════════════════════════════════════════════════════
 # PLOTTING FUNCTIONS
 #═══════════════════════════════════════════════════════════════════════════
@@ -383,6 +424,8 @@ function plot_bifurcation(κ_range, p_base)
 
     vlines!(ax1, [κ_star]; color=:green, linestyle=:dash, linewidth=2,
             label="κ* = $(round(κ_star, digits=4))")
+    ticks_main = ratio_ticks(minimum(κ_vals), maximum(κ_vals), κ_star)
+    ticks_main === nothing || (ax1.xticks = ticks_main)
     axislegend(ax1, position=:lt)
 
     # Panel 2: Stability indicator
@@ -433,6 +476,8 @@ function plot_bifurcation(κ_range, p_base)
     end
 
     vlines!(ax4, [κ_star]; color=:green, linestyle=:dash, linewidth=2)
+    ticks_div = ratio_ticks(minimum(κ_vals), maximum(κ_vals), κ_star)
+    ticks_div === nothing || (ax4.xticks = ticks_div)
     axislegend(ax4, position=:lt)
 
     return fig
@@ -453,10 +498,12 @@ function plot_phase_portraits(κ_values, p_base)
         row = div(idx - 1, 2) + 1
         col = mod(idx - 1, 2) + 1
         
+        κ_star = getproperty(p, :kstar)
+        title_str = "Phase Space: " * format_ratio_label(κ, κ_star)
         ax = Axis(fig[row, col];
                  xlabel="u₁ (agent 1)",
                  ylabel="u₂ (agent 2)",
-                 title="Phase Space: κ = $(round(κ, digits=3))",
+                 title=title_str,
                  aspect=DataAspect())
         
         # Vector field
@@ -515,10 +562,11 @@ function plot_basins(κ_values, p_base; resolution=50)
         row = div(idx - 1, 2) + 1
         col = mod(idx - 1, 2) + 1
         
+        κ_star = getproperty(p, :kstar)
         ax = Axis(fig[row, col];
                  xlabel="Initial u₁",
                  ylabel="Initial u₂",
-                 title="Basin: κ=$(round(κ, digits=3))",
+                 title="Basin: " * format_ratio_label(κ, κ_star),
                  aspect=DataAspect())
         
         basin_map = zeros(resolution, resolution)
@@ -568,11 +616,13 @@ function plot_timeseries(κ, p_base; u0=[0.5, -0.5], tmax=500.0, dt=0.1)
     pol_traj = 0.5 .* (u1 .- u2)
     
     fig = Figure(size=(1600, 1200))
-    
+
+    label_ratio = format_ratio_label(κ, getproperty(p, :kstar); digits_ratio=3)
+
     # Panel 1: Time series
     ax1 = Axis(fig[1, 1:2];
               xlabel="Time", ylabel="Belief",
-              title="Evolution: κ=$(round(κ, digits=3))")
+              title="Evolution: " * label_ratio)
     
     lines!(ax1, t, u1; linewidth=1.5, color=:blue, label="Agent 1")
     lines!(ax1, t, u2; linewidth=1.5, color=:red, label="Agent 2")
@@ -668,9 +718,10 @@ function plot_return_maps(κ_values, p_base)
             traj = reduce(hcat, sol.u)
             u1 = traj[1, :]
             
+            label_ratio = format_ratio_label(κ, getproperty(p, :kstar); digits_ratio=3, digits_kappa=2)
             ax = Axis(fig[κ_idx, s_idx];
                      xlabel="u₁(t)", ylabel="u₁(t+τ)",
-                     title="κ=$(round(κ, digits=2)) - $(scen.name)",
+                     title=label_ratio * " — $(scen.name)",
                      aspect=DataAspect())
             
             if var(u1) < 1e-6
@@ -726,37 +777,40 @@ function plot_parameter_scan(κ_range, p_base; n_points=150)
     polarized_stable_mask = polarized_mask .& (diag.polarized_max .< 0)
     polarized_unstable_mask = polarized_mask .& (.!polarized_stable_mask)
 
-    fig = Figure(size=(1200, 700))
+    fig = Figure(size=(1200, 720))
 
     ax = Axis(fig[1, 1];
              xlabel="Coupling κ", ylabel="Polarization |u₁ - u₂|/2",
              title="Bifurcation Structure")
 
     if any(consensus_stable_mask)
-        scatter!(ax, κ_vals[consensus_stable_mask], zeros(sum(consensus_stable_mask));
-                color=:blue, markersize=4, label="Consensus (stable)")
+        lines!(ax, κ_vals[consensus_stable_mask], zeros(sum(consensus_stable_mask));
+               color=:steelblue, linewidth=3, label="Consensus (stable)")
     end
     if any(consensus_unstable_mask)
-        scatter!(ax, κ_vals[consensus_unstable_mask], zeros(sum(consensus_unstable_mask));
-                color=:blue, markersize=4, marker=:xcross, alpha=0.6,
-                label="Consensus (unstable)")
+        lines!(ax, κ_vals[consensus_unstable_mask], zeros(sum(consensus_unstable_mask));
+               color=:steelblue, linewidth=3, linestyle=:dash,
+               label="Consensus (unstable)")
     end
     if any(polarized_stable_mask)
-        scatter!(ax, κ_vals[polarized_stable_mask], diag.polarized_amp[polarized_stable_mask];
-                color=:red, markersize=4, label="Polarized (stable)")
-        scatter!(ax, κ_vals[polarized_stable_mask], -diag.polarized_amp[polarized_stable_mask];
-                color=:red, markersize=4)
+        lines!(ax, κ_vals[polarized_stable_mask], diag.polarized_amp[polarized_stable_mask];
+               color=:firebrick, linewidth=3, label="Polarized (stable)")
+        lines!(ax, κ_vals[polarized_stable_mask], -diag.polarized_amp[polarized_stable_mask];
+               color=:firebrick, linewidth=3)
     end
     if any(polarized_unstable_mask)
-        scatter!(ax, κ_vals[polarized_unstable_mask], diag.polarized_amp[polarized_unstable_mask];
-                color=:red, markersize=4, marker=:xcross, alpha=0.6,
-                label="Polarized (unstable)")
-        scatter!(ax, κ_vals[polarized_unstable_mask], -diag.polarized_amp[polarized_unstable_mask];
-                color=:red, markersize=4, marker=:xcross, alpha=0.6)
+        lines!(ax, κ_vals[polarized_unstable_mask], diag.polarized_amp[polarized_unstable_mask];
+               color=:darkorange, linewidth=3, linestyle=:dot,
+               label="Polarized (unstable)")
+        lines!(ax, κ_vals[polarized_unstable_mask], -diag.polarized_amp[polarized_unstable_mask];
+               color=:darkorange, linewidth=3, linestyle=:dot)
     end
 
-    vlines!(ax, [κ_star]; color=:green, linestyle=:dash, linewidth=3,
+    vlines!(ax, [κ_star]; color=:seagreen, linestyle=:dash, linewidth=3,
            label="κ* = $(round(κ_star, digits=4))")
+
+    ticks = ratio_ticks(minimum(κ_vals), maximum(κ_vals), κ_star)
+    ticks === nothing || (ax.xticks = ticks)
 
     axislegend(ax, position=:lt)
 
@@ -802,6 +856,10 @@ function plot_lyapunov(κ_range, p_base; tmax=2000.0)
           min.(lyap_values, 0); color=(:green, 0.2))
     band!(ax, κ_vals, zeros(length(lyap_values)),
           max.(lyap_values, 0); color=(:red, 0.2))
+
+    κ_star = getproperty(p_base, :kstar)
+    ticks = ratio_ticks(minimum(κ_vals), maximum(κ_vals), κ_star)
+    ticks === nothing || (ax.xticks = ticks)
     
     return fig
 end
@@ -852,15 +910,32 @@ function analyze_config(config_path::String)
     
     # Determine κ range
     if haskey(cfg, "sweep")
-        κ_min = cfg["sweep"]["kappa_from"]
-        κ_max = κ_star * cfg["sweep"]["kappa_to_factor_of_kstar"]
-        n_points = cfg["sweep"]["points"]
+        sweep_cfg = cfg["sweep"]
+        n_points = get(sweep_cfg, "points", 121)
+
+        if haskey(sweep_cfg, "kappa_from_factor_of_kstar") && isfinite(κ_star) && κ_star > 0
+            κ_min = κ_star * Float64(sweep_cfg["kappa_from_factor_of_kstar"])
+        else
+            κ_min = Float64(get(sweep_cfg, "kappa_from", max(0.0, 0.5 * κ_star)))
+        end
+
+        if haskey(sweep_cfg, "kappa_to")
+            κ_max = Float64(sweep_cfg["kappa_to"])
+        else
+            factor = Float64(get(sweep_cfg, "kappa_to_factor_of_kstar", 3.0))
+            κ_max = (isfinite(κ_star) && κ_star > 0) ? κ_star * factor : κ_min + max(abs(κ_min), 1.0)
+        end
     else
-        κ_min = 0.6 * κ_star
-        κ_max = 1.5 * κ_star
-        n_points = 100
+        κ_min = max(0.0, 0.4 * κ_star)
+        κ_max = (isfinite(κ_star) && κ_star > 0) ? 2.5 * κ_star : κ_min + 1.0
+        n_points = 121
     end
-    
+
+    if κ_max <= κ_min
+        bump = max(abs(κ_star) * 0.25, 1e-3)
+        κ_max = κ_min + bump
+    end
+
     @info "Analysis range: κ ∈ [$(round(κ_min, digits=3)), $(round(κ_max, digits=3))]"
     @info ""
     
@@ -874,9 +949,9 @@ function analyze_config(config_path::String)
     PlottingCairo.set_theme_elegant!()
     
     # Generate plots
-    κ_range_fine = range(κ_min, κ_max, length=n_points)
-    κ_range_coarse = range(κ_min, κ_max, length=max(20, div(n_points, 5)))
-    κ_selected = [0.85*κ_star, 0.95*κ_star, 1.05*κ_star, 1.15*κ_star]
+    κ_range_fine = range(κ_min, κ_max; length=n_points)
+    κ_range_coarse = range(κ_min, κ_max; length=max(20, div(n_points, 5)))
+    κ_selected = kappa_from_ratios(κ_star, κ_min, κ_max, [0.5, 0.9, 1.1, 1.6]; fallback_count=4)
     
     # Plot 1: Bifurcation
     try
@@ -905,7 +980,7 @@ function analyze_config(config_path::String)
     # Plot 3: Basins
     try
         @info "Generating Plot 3: Basins of attraction"
-        κ_basin = [0.9*κ_star, 1.0*κ_star, 1.1*κ_star, 1.2*κ_star]
+        κ_basin = kappa_from_ratios(κ_star, κ_min, κ_max, [0.6, 0.9, 1.1, 1.5]; fallback_count=4)
         fig = plot_basins(κ_basin, p_base; resolution=40)
         filename = "03_basins.png"
         save(joinpath(outdir, filename), fig)
@@ -921,10 +996,11 @@ function analyze_config(config_path::String)
         dt = cfg["dt"]
         T = min(cfg["T"], 500.0)
         
-        for κ_factor in [0.95, 1.05, 1.15]
-            κ = κ_factor * κ_star
+        κ_times = kappa_from_ratios(κ_star, κ_min, κ_max, [0.75, 1.05, 1.4]; fallback_count=3)
+        for κ in κ_times
             fig = plot_timeseries(κ, p_base; tmax=T, dt=dt)
-            filename = "04_timeseries_k$(round(κ_factor, digits=2)).png"
+            ratio_tag = isfinite(κ_star) && κ_star > 0 ? @sprintf("%0.2f", κ / κ_star) : @sprintf("%0.2f", κ)
+            filename = "04_timeseries_ratio_$(replace(ratio_tag, "." => "p")).png"
             save(joinpath(outdir, filename), fig)
         end
         results["timeseries"] = "04_timeseries_*.png"
@@ -936,7 +1012,7 @@ function analyze_config(config_path::String)
     # Plot 5: Return maps
     try
         @info "Generating Plot 5: Return maps"
-        κ_return = [0.95*κ_star, 1.05*κ_star, 1.15*κ_star]
+        κ_return = kappa_from_ratios(κ_star, κ_min, κ_max, [0.8, 1.05, 1.4]; fallback_count=3)
         fig = plot_return_maps(κ_return, p_base)
         filename = "05_return_maps.png"
         save(joinpath(outdir, filename), fig)
@@ -1003,6 +1079,9 @@ function analyze_config(config_path::String)
         println(io, "Analysis Range:")
         println(io, "  κ ∈ [$(round(κ_min, digits=3)), $(round(κ_max, digits=3))]")
         println(io, "  Points: $n_points")
+        if isfinite(κ_star) && κ_star > 0
+            println(io, "  κ/κ* ∈ [$(round(κ_min/κ_star, digits=3)), $(round(κ_max/κ_star, digits=3))]")
+        end
         println(io, "")
         println(io, "Generated Plots:")
         for (key, file) in sort(collect(results))

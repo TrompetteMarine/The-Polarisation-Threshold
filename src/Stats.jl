@@ -44,55 +44,55 @@ and measuring decay rate at κ=0
 function estimate_g(p::Params; N::Int=50_000, T::Float64=50.0, dt::Float64=0.005,
                     ε::Float64=1e-2, window::Tuple{Float64,Float64}=(2.0, 20.0), seed::Int=0)
     seed != 0 && Random.seed!(seed)
-    
+
     steps = Int(round(T/dt))
+    steps > 10 || error("Simulation horizon T must provide at least 10 time steps")
+
     N1 = div(N, 2)
     N2 = N - N1
     σ2_over_2λ = p.σ^2 / (2.0 * p.λ)
-    
-    u1 = randn(N1) * sqrt(σ2_over_2λ) .+ ε
-    u2 = randn(N2) * sqrt(σ2_over_2λ) .- ε
-    u = vcat(u1, u2)
 
-    g_hist = Vector{Float64}(undef, steps)
+    u = Vector{Float64}(undef, N)
+    view1 = @view u[1:N1]
+    view2 = @view u[N1+1:end]
+
+    view1 .= randn(N1) * sqrt(σ2_over_2λ) .+ ε
+    view2 .= randn(N2) * sqrt(σ2_over_2λ) .- ε
+
+    odd_hist = Vector{Float64}(undef, steps)
 
     for t in 1:steps
-        g = mean(u)
-        g_hist[t] = g
-        
-        # EM step at κ = 0
-        sigma_sqrt_dt = p.σ * sqrt(dt)
-        for i in eachindex(u)
-            du = (-p.λ * u[i]) * dt + sigma_sqrt_dt * randn()
-            u[i] += du
-            
-            # State-dependent resets
-            rate = ν(p.hazard, u[i], p.Θ)
-            if rate > 0.0 && rand() < 1.0 - exp(-rate * dt)
-                u[i] = p.c0 * u[i]
-            end
-        end
+        gbar = mean(u)
+        euler_maruyama_step!(u, 0.0, gbar, p, dt)
+        reset_step!(u, p, dt)
+
+        m1 = mean(view1)
+        m2 = mean(view2)
+        odd_hist[t] = 0.5 * (m1 - m2)
     end
 
-    # Fit log |g(t)| ≈ log A - g * t on chosen window
-    tgrid = collect(0.0:dt:T-dt)
+    # Fit log |a(t)| ≈ log A - g * t over the specified window
+    tgrid = collect(range(dt; step=dt, length=steps))
     t0, t1 = window
     i0 = clamp(Int(round(t0/dt)), 1, steps)
-    i1 = clamp(Int(round(t1/dt)), i0+5, steps)
-    
-    y = log.(abs.(g_hist[i0:i1]) .+ eps())
+    i1 = clamp(Int(round(t1/dt)), i0 + 5, steps)
+
+    amps = abs.(odd_hist[i0:i1]) .+ eps()
+    y = log.(amps)
     x = tgrid[i0:i1]
-    
-    # OLS slope
+
     n = length(x)
     sx = sum(x)
     sy = sum(y)
     sxx = sum(x .* x)
     sxy = sum(x .* y)
-    slope = (n*sxy - sx*sy) / (n*sxx - sx^2)
-    g_est = -slope  # since gbar decays as exp(-g t)
-    
-    return max(g_est, 1e-6)
+    denom = n * sxx - sx^2
+    denom ≈ 0 && return 1e-6
+
+    slope = (n * sxy - sx * sy) / denom
+    g_est = -slope
+
+    return max(g_est, 1e-5)
 end
 
 """
