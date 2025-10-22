@@ -1,4 +1,4 @@
-module Bifurcation
+module BifurcationCore
 
 using LinearAlgebra
 using DifferentialEquations: ODEProblem, solve

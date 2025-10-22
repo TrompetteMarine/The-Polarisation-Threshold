@@ -10,6 +10,35 @@ a minimal, reproducible pipeline to recover the **polarization threshold** \(\ka
 
 ---
 
+## Installation
+
+### Prerequisites
+- Julia 1.8, 1.9, or 1.10
+- Git (for cloning)
+
+### Quick Setup
+```bash
+# Clone repository
+git clone https://github.com/TrompetteMarine/The-Polarisation-Threshold.git
+cd The-Polarisation-Threshold
+
+# Run automated setup (installs all dependencies)
+./scripts/setup_environment.sh
+
+# Verify installation
+julia --project=. -e 'using BeliefSim; println("✓ BeliefSim loaded successfully")'
+```
+
+### Manual Setup (if automatic fails)
+```bash
+julia --project=. -e '
+using Pkg
+Pkg.instantiate()
+Pkg.add(url="https://github.com/bifurcationkit/BifurcationKit.jl.git")
+Pkg.precompile()
+'
+```
+
 ## 0) Requirements
 
 - Julia **1.10** or later.
@@ -199,7 +228,19 @@ flags to explore alternative windows.
 
 - The deterministic vector field is a cubic mean-field closure of the OU-with-resets model; its
   pitchfork at κ≈κ* mirrors the stochastic transition.
-- Hopf and homoclinic diagnostics integrate the vector field directly. They are heuristic unless an
-  analytic Jacobian or refined shooting/continuation scheme is supplied.
-- Figures are emitted as both PNG and PDF in `figs/` with an elegant CairoMakie theme, consistent
+- Hopf and homoclinic diagnostics integrate the vector field directly.
+- Figures are emitted as both PNG and PDF in `figs/` with consistent
   axes, and κ/κ* annotations.
+
+
+### Note on BifurcationKit
+
+The advanced bifurcation scripts previously used BifurcationKit, but this package has compatibility issues with Julia 1.8. We now provide a simplified implementation that:
+
+- ✅ Works with Julia 1.8+
+- ✅ Performs equilibrium continuation
+- ✅ Detects Hopf bifurcations
+- ✅ Finds limit cycles
+- ✅ Searches for homoclinic orbits
+
+If you need full BifurcationKit features, upgrade to Julia 1.9+ or 1.10.

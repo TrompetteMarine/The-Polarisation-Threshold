@@ -1,81 +1,196 @@
 module Plotting
 
-using CairoMakie
-using LinearAlgebra
-using Colors
-using Statistics
+using Plots, FFTW, Statistics
+using ..Types: KappaSweepResult, Params
 
-export set_theme_elegant!, phase_portrait!, mark_points!, savefig_smart
+export plot_bifurcation, plot_vector_field, plot_orbit, plot_phase_diagram
 
-function set_theme_elegant!()
-    set_theme!(Theme(
-        fontsize = 16,
-        Axis = (xlabelsize=16, ylabelsize=16, xticklabelsize=12, yticklabelsize=12,
-                xgridstyle=:dash, ygridstyle=:dash, xgridcolor=:gray80, ygridcolor=:gray80,
-                spinewidth=1.2),
-        Legend = (framevisible=false,)
-    ))
+# Common plotting settings
+const PLOT_DEFAULTS = Dict(
+    :fontfamily => "Computer Modern",
+    :linewidth => 2,
+    :grid => false,
+    :background_color => :white,
+    :foreground_color => :black,
+    :legendfontsize => 8,
+    :guidefontsize => 10,
+    :tickfontsize => 9,
+    :size => (800, 500),
+    :dpi => 300
+)
+
+function create_base_plot(;kwargs...)
+    plot(; merge(PLOT_DEFAULTS, Dict(kwargs...))...)
 end
 
-function _as_matrix(points)
-    if points === nothing
-        return zeros(Float64, 0, 2)
-    elseif isa(points, AbstractMatrix)
-        size(points, 2) == 2 || throw(ArgumentError("Points must have two columns."))
-        return Matrix{Float64}(points)
-    elseif isa(points, AbstractVector)
-        if length(points) == 0
-            return zeros(Float64, 0, 2)
-        elseif length(points) == 2
-            return reshape(Float64.(points), 1, 2)
-        elseif eltype(points) <: AbstractVector
-            mat = hcat(points...)
-            size(mat, 1) == 2 || throw(ArgumentError("Nested points must be 2-vectors."))
-            return permutedims(Float64.(mat))
+function plot_bifurcation(res::KappaSweepResult; κstar=nothing, 
+                         title="Bifurcation Diagram",
+                         extend_factor=2.0, num_points=2000)
+    # Create plot
+    plt = plot(
+        xlabel="Coupling strength κ",
+        ylabel="Mean field amplitude |⟨u⟩|",
+        title=title,
+        legend=:topleft,
+        background_color=:white,
+        foreground_color=:black,
+        grid=false,
+        fontfamily="Computer Modern",
+        size=(800, 500),
+        dpi=300
+    )
+    
+    # Plot data points
+    scatter!(plt, res.κ, res.amp, 
+            color=:blue, alpha=0.6, markersize=4,
+            label="Simulation")
+    
+    if !isnothing(κstar)
+        # Extended range for theoretical curves
+        κ_min = 0.0
+        κ_max = maximum(res.κ) * extend_factor
+        κ_extended = range(κ_min, κ_max, length=num_points)
+        
+        # Pre-bifurcation stable branch
+        κ_pre = κ_extended[κ_extended .≤ κstar]
+        plot!(plt, κ_pre, zeros(length(κ_pre)), 
+              color=:black, linewidth=3, label="Stable")
+        
+        # Post-bifurcation branches
+        κ_post = κ_extended[κ_extended .> κstar]
+        stable_branches = @. sqrt(max(0, (κ_post - κstar) / κstar))
+        
+        # Unstable middle branch
+        plot!(plt, κ_post, zeros(length(κ_post)), 
+              color=:black, linestyle=:dash, linewidth=2, label="Unstable")
+        
+        # Stable polarized branches
+        plot!(plt, κ_post, stable_branches, 
+              color=:black, linewidth=3, label=nothing)
+        plot!(plt, κ_post, -stable_branches, 
+              color=:black, linewidth=3, label=nothing)
+        
+        # Critical point
+        scatter!(plt, [κstar], [0], 
+                color=:red, markersize=6, label="κ*")
+        vline!(plt, [κstar], color=:red, linestyle=:dash, 
+               alpha=0.3, label=nothing)
+    end
+    
+    return plt
+end
+
+function plot_vector_field(p::Params, κ::Float64;
+                         xlims=(-3,3), ylims=(-3,3),
+                         nx=20, ny=20)
+    plt = plot(
+        xlabel="u₁", ylabel="u₂",
+        title="Phase space (κ = $(round(κ, digits=3)))",
+        aspect_ratio=1,
+        xlims=xlims, ylims=ylims,
+        legend=:topright
+    )
+    
+    # Create grid
+    x = range(xlims..., length=nx)
+    y = range(ylims..., length=ny)
+    
+    # Compute vector field
+    for xi in x, yi in y
+        u = [xi, yi]
+        g = mean(u)
+        du = [-p.λ * u[1] + κ * g,
+              -p.λ * u[2] + κ * g]
+        
+        mag = sqrt(sum(abs2, du))
+        if mag > 1e-10
+            du_norm = du ./ mag
+            # Plot small arrow
+            quiver!([xi], [yi], 
+                   quiver=([0.1*du_norm[1]], [0.1*du_norm[2]]),
+                   color=:gray, alpha=0.5, label=nothing)
         end
     end
-    throw(ArgumentError("Unsupported point container."))
+    
+    # Add fixed points if κ > λ (approximate threshold)
+    if κ > p.λ
+        r = sqrt(max(0, (κ - p.λ) / κ))
+        scatter!(plt, [0], [0], color=:black, markersize=6, label="Unstable")
+        scatter!(plt, [r, -r], [0, 0], color=:red, markersize=6, label="Stable")
+    else
+        scatter!(plt, [0], [0], color=:red, markersize=6, label="Stable")
+    end
+    
+    return plt
 end
 
-function phase_portrait!(ax, f, p; lims = (-3,3,-3,3), density=45, alpha=0.35)
-    xs = range(lims[1], lims[2], length=density)
-    ys = range(lims[3], lims[4], length=density)
-    X = [x for y in ys, x in xs]
-    Y = [y for y in ys, x in xs]
-    U = similar(X, Float64)
-    V = similar(Y, Float64)
-    for i in eachindex(ys), j in eachindex(xs)
-        u = [X[i,j], Y[i,j]]
-        du = f(u, p)
-        n = max(norm(du), 1e-12)
-        U[i,j] = du[1] / n
-        V[i,j] = du[2] / n
+function plot_orbit(t::AbstractVector{<:Real}, u::AbstractVector{<:Real}; 
+                   show_envelope::Bool=true, title="Time Evolution")
+    plt = plot(
+        xlabel="Time", ylabel="u", 
+        title=title,
+        legend=:topright,
+        size=(800, 500)
+    )
+    
+    # Main trajectory
+    plot!(plt, t, u, color=:black, linewidth=1, label="Trajectory")
+    
+    if show_envelope && length(u) > 100
+        # Compute envelope using Hilbert transform
+        try
+            analytical = hilbert(u)
+            envelope = abs.(analytical)
+            
+            # Downsample for clarity
+            stride = max(1, div(length(t), 1000))
+            t_env = t[1:stride:end]
+            env_pos = envelope[1:stride:end]
+            
+            # Add envelope
+            plot!(plt, t_env, env_pos, color=:red, alpha=0.3, 
+                 linewidth=2, label="Envelope")
+            plot!(plt, t_env, -env_pos, color=:red, alpha=0.3, 
+                 linewidth=2, label=nothing)
+        catch e
+            @warn "Failed to compute envelope" exception=e
+        end
     end
-    quiver!(ax, X, Y, U, V; arrowsize=6, linewidth=1, color=:gray40, alpha=alpha)
-    xlims!(ax, lims[1], lims[2])
-    ylims!(ax, lims[3], lims[4])
-    ax.aspect = DataAspect()
-    return ax
+    
+    return plt
 end
 
-function mark_points!(ax; stable=nothing, unstable=nothing)
-    spts = _as_matrix(stable)
-    if size(spts, 1) > 0
-        scatter!(ax, spts[:,1], spts[:,2]; color=:red, markersize=14, label="Stable")
-    end
-    upts = _as_matrix(unstable)
-    if size(upts, 1) > 0
-        scatter!(ax, upts[:,1], upts[:,2]; color=:black, markersize=10, label="Unstable")
-    end
-    return ax
+function plot_phase_diagram(u::AbstractVector{<:Real}, du::AbstractVector{<:Real}; 
+                          title="Phase Space")
+    plt = plot(
+        xlabel="u", ylabel="du/dt",
+        title=title,
+        aspect_ratio=1,
+        legend=:topright
+    )
+    
+    scatter!(plt, u, du, color=:black, alpha=0.3, 
+            markersize=2, markerstrokewidth=0, label=nothing)
+    
+    return plt
 end
 
-function savefig_smart(fig, path::AbstractString)
-    dir = dirname(path)
-    dir == "" && (dir = ".")
-    mkpath(dir)
-    save(path * ".png", fig; px_per_unit=2)
-    save(path * ".pdf", fig)
+# Helper function for Hilbert transform
+function hilbert(x::AbstractVector{<:Real})
+    N = length(x)
+    X = fft(x)
+    H = zeros(ComplexF64, N)
+    
+    # Create Hilbert filter in frequency domain
+    H[1] = X[1]  # DC component
+    if N % 2 == 0
+        H[div(N,2)+1] = X[div(N,2)+1]  # Nyquist for even N
+        H[2:div(N,2)] = 2 .* X[2:div(N,2)]
+    else
+        H[2:div(N+1,2)] = 2 .* X[2:div(N+1,2)]
+    end
+    
+    return ifft(H)
 end
 
 end # module
