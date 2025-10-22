@@ -794,16 +794,13 @@ function analyze_config(config_path::String)
     @info "  Comprehensive Analysis from YAML"
     @info "═══════════════════════════════════════════════════════════════"
     @info "Config: $config_path"
-    results["kappa_star"] = string(κ_star)
-    results["Vstar"] = string(p_base.Vstar)
-    results["g"] = string(p_base.g)
 
     @info ""
-    
+
     # Load configuration
     cfg = load_yaml_config(config_path)
     config_name = get(cfg, "name", splitext(basename(config_path))[1])
-    
+
     @info "Configuration: $config_name"
     @info "  λ = $(cfg["params"]["lambda"])"
     @info "  σ = $(cfg["params"]["sigma"])"
@@ -814,6 +811,11 @@ function analyze_config(config_path::String)
     # Convert to model parameters
     p_base, meta = yaml_to_model_params(cfg)
     κ_star = getproperty(p_base, :kstar)
+
+    results = Dict{String, String}()
+    results["kappa_star"] = string(κ_star)
+    results["Vstar"] = string(p_base.Vstar)
+    results["g"] = string(p_base.g)
 
     @info "Model parameters:"
     @info "  λ = $(p_base.λ)"
@@ -851,8 +853,6 @@ function analyze_config(config_path::String)
     κ_range_fine = range(κ_min, κ_max, length=n_points)
     κ_range_coarse = range(κ_min, κ_max, length=max(20, div(n_points, 5)))
     κ_selected = [0.85*κ_star, 0.95*κ_star, 1.05*κ_star, 1.15*κ_star]
-    
-    results = Dict{String, String}()
     
     # Plot 1: Bifurcation
     try
