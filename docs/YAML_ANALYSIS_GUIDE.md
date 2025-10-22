@@ -30,6 +30,7 @@ All dependencies are in `Project.toml`:
 - `CairoMakie.jl` - Plotting
 - `DifferentialEquations.jl` - ODE solving
 - `FFTW.jl` - Spectral analysis
+- No `BifurcationKit.jl` dependency – the YAML analysis runs on the in-repo normal-form tools.
 
 ## Script Features
 
@@ -45,16 +46,19 @@ All dependencies are in `Project.toml`:
 
 The script extracts from your YAML:
 - `λ` (lambda) - Mean reversion rate
-- `σ` (sigma) - Noise strength  
+- `σ` (sigma) - Noise strength
 - `Θ` (theta) - Reset threshold
 - `c₀` - Reset contraction
-- `T` - Simulation time (for plots 4, 7)
-- `dt` - Time step (for plot 4)
+- `hazard` - State-dependent Poisson reset specification (step or logistic)
+- `T` - Simulation horizon (used for plots 4 & 7)
+- `dt` - Time step (used for time-series analysis)
 - `sweep` - κ range and resolution
 
-And computes:
-- `β = σ/λ` - Normalized noise
-- `κ* = λ` - Critical coupling (approximation)
+And calibrates the reduced normal form by Monte Carlo simulation of the full Poisson-reset model:
+- `V*` — stationary dispersion at κ = 0 (estimated via Euler–Maruyama with state-dependent Poisson resets).
+- `g` — odd-mode decay rate at κ = 0 (estimated by injecting a small antisymmetric perturbation).
+- `β = (2λV*/σ²)·κ*` — cubic saturation chosen so the polarized branch obeys `|u₁-u₂|/2 ≈ √((κ-κ*)/κ*)`.
+- `κ* = g σ² / (2 λ V*)` — theoretical polarization threshold (Theorem 1).
 
 ## Troubleshooting
 
@@ -65,7 +69,7 @@ And computes:
 → Run: `using Pkg; Pkg.add("CairoMakie")`
 
 **Plot generation fails**
-→ Check logs, script continues to next plot
+→ Check logs, script continues to next plot; calibration values are still written to `summary.txt`
 
 **No YAML files found**
 → Ensure files end in `.yaml` or `.yml`
