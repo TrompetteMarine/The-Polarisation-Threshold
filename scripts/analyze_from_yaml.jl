@@ -25,6 +25,11 @@ using Logging
 using Printf
 using Dates
 
+# Import simulation toolkit for estimating V*, g, and κ*
+using BeliefSim
+using BeliefSim.Types: Params, StepHazard, LogisticHazard
+using BeliefSim.Stats: estimate_Vstar, estimate_g, critical_kappa
+
 # Load YAML
 try
     using YAML
@@ -91,20 +96,69 @@ Convert YAML parameters to ModelInterface format
 """
 function yaml_to_model_params(cfg::Dict)
     params = cfg["params"]
-    
+
     # Extract core parameters
     λ = Float64(params["lambda"])
     σ = Float64(params["sigma"])
-    
-    # For mean-field 2-agent model:
-    # β represents the reset/noise strength (analogous to σ in the full model)
-    β = σ / λ  # Normalized noise strength
-    
-    # Critical coupling for 2-agent symmetric system
-    # From linear stability: κ* = λ (when mean reversion = coupling)
-    κ_star = λ
-    
-    return (λ=λ, beta=β, kappa=0.0, kstar=κ_star)
+    Θ = Float64(params["theta"])
+    c0 = Float64(params["c0"])
+
+    hazard_cfg = params["hazard"]
+    hazard = begin
+        kind = lowercase(String(hazard_cfg["kind"]))
+        if kind == "step"
+            StepHazard(Float64(hazard_cfg["nu0"]))
+        elseif kind == "logistic"
+            LogisticHazard(Float64(hazard_cfg["numax"]), Float64(hazard_cfg["beta"]))
+        else
+            error("Unsupported hazard kind: $(hazard_cfg["kind"]) — use 'step' or 'logistic'.")
+        end
+    end
+
+    seed = get(cfg, "seed", 0)
+    N = cfg["N"]
+    T = cfg["T"]
+    dt = cfg["dt"]
+    burn_in = cfg["burn_in"]
+
+    p_sim = Params(; λ=λ, σ=σ, Θ=Θ, c0=c0, hazard=hazard)
+
+    @info "  Estimating stationary dispersion V* via Monte Carlo" N=N T=T dt=dt burn_in=burn_in seed=seed
+    Vstar = estimate_Vstar(p_sim; N=N, T=T, dt=dt, burn_in=burn_in, seed=seed)
+
+    @info "  Estimating odd-mode decay g at κ=0"
+    g_est = estimate_g(p_sim;
+                       N=max(N, 20_000),
+                       T=min(max(T, 40.0), 120.0),
+                       dt=min(dt, 0.01),
+                       seed=seed)
+
+    κ_star = critical_kappa(p_sim; Vstar=Vstar, g=g_est, N=N, T=T, dt=dt, burn_in=burn_in, seed=seed)
+
+    # Normalize cubic term so that polarization amplitude ~ sqrt(κ - κ*) scaled by V*
+    β = 1.0 / max(Vstar, eps())
+    p_model = (
+        λ=λ,
+        σ=σ,
+        Θ=Θ,
+        c0=c0,
+        Vstar=Vstar,
+        g=g_est,
+        beta=β,
+        kappa=0.0,
+        kstar=κ_star,
+        seed=seed,
+    )
+
+    meta = (
+        params=p_sim,
+        hazard=hazard,
+        Vstar=Vstar,
+        g=g_est,
+        κ_star=κ_star,
+    )
+
+    return p_model, meta
 end
 
 #═══════════════════════════════════════════════════════════════════════════
@@ -160,6 +214,14 @@ function compute_psd(x::Vector{Float64}, dt::Float64)
 end
 
 """
+Order parameter for polarization: half the difference between the two agents.
+Falls back to mean if dimensionality ≠ 2.
+"""
+polarization_coordinate(u::AbstractVector) = length(u) == 2 ? 0.5 * (u[1] - u[2]) : mean(u)
+
+polarization_amplitude(u::AbstractVector) = abs(polarization_coordinate(u))
+
+"""
 Classify attractor by running trajectory
 """
 function classify_attractor(u0::Vector{Float64}, p; tmax=500.0)
@@ -173,13 +235,13 @@ function classify_attractor(u0::Vector{Float64}, p; tmax=500.0)
     try
         sol = solve(prob, Tsit5(); reltol=1e-6, abstol=1e-6)
         u_final = sol.u[end]
-        mean_final = mean(u_final)
-        
-        if abs(mean_final) < 0.1
+        pol_final = polarization_coordinate(u_final)
+
+        if abs(pol_final) < 0.05
             return 0  # Consensus
-        elseif mean_final > 0.1
+        elseif pol_final > 0.05
             return 1  # Positive polarization
-        elseif mean_final < -0.1
+        elseif pol_final < -0.05
             return -1  # Negative polarization
         else
             return 0
@@ -249,7 +311,7 @@ function plot_bifurcation(κ_range, p_base)
     u1_eq = [u[1] for u in branch.equilibria]
     u2_eq = [u[2] for u in branch.equilibria]
     mean_eq = (u1_eq .+ u2_eq) ./ 2
-    polarization = abs.(u1_eq .- u2_eq)
+    polarization = 0.5 .* abs.(u1_eq .- u2_eq)
     
     stable_mask = [all(real.(λs) .< 0) for λs in branch.eigenvalues]
     max_real_eig = [maximum(real.(λs)) for λs in branch.eigenvalues]
@@ -304,7 +366,7 @@ function plot_bifurcation(κ_range, p_base)
     # Panel 4: Polarization
     ax4 = Axis(fig[3, 1:2];
               xlabel="κ",
-              ylabel="Polarization |u₁ - u₂|",
+              ylabel="Polarization |u₁ - u₂|/2",
               title="Opinion Divergence")
     
     lines!(ax4, branch.κ_values, polarization; linewidth=2, color=:orange)
@@ -437,6 +499,7 @@ function plot_timeseries(κ, p_base; u0=[0.5, -0.5], tmax=500.0, dt=0.1)
     traj = reduce(hcat, sol.u)
     u1, u2 = traj[1, :], traj[2, :]
     mean_traj = (u1 .+ u2) ./ 2
+    pol_traj = 0.5 .* (u1 .- u2)
     
     fig = Figure(size=(1600, 1200))
     
@@ -452,10 +515,10 @@ function plot_timeseries(κ, p_base; u0=[0.5, -0.5], tmax=500.0, dt=0.1)
     axislegend(ax1, position=:rt)
     
     # Panel 2: Polarization
-    ax2 = Axis(fig[2, 1]; xlabel="Time", ylabel="|u₁ - u₂|",
+    ax2 = Axis(fig[2, 1]; xlabel="Time", ylabel="|u₁ - u₂|/2",
               title="Polarization")
-    
-    polarization = abs.(u1 .- u2)
+
+    polarization = abs.(pol_traj)
     lines!(ax2, t, polarization; linewidth=1.5, color=:purple)
     
     # Panel 3: Distance from origin
@@ -469,8 +532,8 @@ function plot_timeseries(κ, p_base; u0=[0.5, -0.5], tmax=500.0, dt=0.1)
     ax4 = Axis(fig[3, 1]; xlabel="Lag", ylabel="ACF",
               title="Autocorrelation")
     
-    max_lag = min(500, length(mean_traj) ÷ 4)
-    acf = autocorrelation(mean_traj, max_lag)
+    max_lag = min(500, length(pol_traj) ÷ 4)
+    acf = autocorrelation(pol_traj, max_lag)
     lines!(ax4, (0:max_lag) .* dt, acf; linewidth=2, color=:blue)
     hlines!(ax4, [0]; color=:black, linestyle=:dash, linewidth=1)
     
@@ -478,7 +541,7 @@ function plot_timeseries(κ, p_base; u0=[0.5, -0.5], tmax=500.0, dt=0.1)
     ax5 = Axis(fig[3, 2]; xlabel="Frequency", ylabel="Power",
               title="Spectrum", xscale=log10, yscale=log10)
     
-    freqs, psd = compute_psd(mean_traj, dt)
+    freqs, psd = compute_psd(pol_traj, dt)
     valid = (freqs .> 0) .& (psd .> 1e-12)
     lines!(ax5, freqs[valid], psd[valid]; linewidth=2, color=:blue)
     
@@ -631,10 +694,10 @@ function plot_parameter_scan(κ_range, p_base; n_points=150)
                     max_re = maximum(real.(λs))
                     
                     if max_re < 0
-                        push!(polarized_stable, abs(mean(u_eq)))
+                        push!(polarized_stable, polarization_amplitude(u_eq))
                         push!(polarized_κ_stable, κ)
                     else
-                        push!(polarized_unstable, abs(mean(u_eq)))
+                        push!(polarized_unstable, polarization_amplitude(u_eq))
                         push!(polarized_κ_unstable, κ)
                     end
                     break
@@ -648,7 +711,7 @@ function plot_parameter_scan(κ_range, p_base; n_points=150)
     fig = Figure(size=(1200, 700))
     
     ax = Axis(fig[1, 1];
-             xlabel="Coupling κ", ylabel="|⟨u⟩|",
+             xlabel="Coupling κ", ylabel="Polarization |u₁ - u₂|/2",
              title="Bifurcation Structure")
     
     if !isempty(trivial_κ_stable)
@@ -731,12 +794,13 @@ function analyze_config(config_path::String)
     @info "  Comprehensive Analysis from YAML"
     @info "═══════════════════════════════════════════════════════════════"
     @info "Config: $config_path"
+
     @info ""
-    
+
     # Load configuration
     cfg = load_yaml_config(config_path)
     config_name = get(cfg, "name", splitext(basename(config_path))[1])
-    
+
     @info "Configuration: $config_name"
     @info "  λ = $(cfg["params"]["lambda"])"
     @info "  σ = $(cfg["params"]["sigma"])"
@@ -745,13 +809,21 @@ function analyze_config(config_path::String)
     @info ""
     
     # Convert to model parameters
-    p_base = yaml_to_model_params(cfg)
+    p_base, meta = yaml_to_model_params(cfg)
     κ_star = getproperty(p_base, :kstar)
-    
+
+    results = Dict{String, String}()
+    results["kappa_star"] = string(κ_star)
+    results["Vstar"] = string(p_base.Vstar)
+    results["g"] = string(p_base.g)
+
     @info "Model parameters:"
     @info "  λ = $(p_base.λ)"
+    @info "  σ = $(p_base.σ)"
+    @info "  V* ≈ $(round(p_base.Vstar, digits=5))"
+    @info "  g ≈ $(round(p_base.g, digits=5))"
     @info "  β = $(p_base.beta)"
-    @info "  κ* = $(round(κ_star, digits=4))"
+    @info "  κ* (theory) = $(round(κ_star, digits=5))"
     @info ""
     
     # Determine κ range
@@ -781,8 +853,6 @@ function analyze_config(config_path::String)
     κ_range_fine = range(κ_min, κ_max, length=n_points)
     κ_range_coarse = range(κ_min, κ_max, length=max(20, div(n_points, 5)))
     κ_selected = [0.85*κ_star, 0.95*κ_star, 1.05*κ_star, 1.15*κ_star]
-    
-    results = Dict{String, String}()
     
     # Plot 1: Bifurcation
     try
@@ -892,10 +962,19 @@ function analyze_config(config_path::String)
         println(io, "  Θ = $(cfg["params"]["theta"])")
         println(io, "  c₀ = $(cfg["params"]["c0"])")
         println(io, "")
-        println(io, "Model:")
+        println(io, "Model (normal form calibration):")
         println(io, "  λ = $(p_base.λ)")
+        println(io, "  σ = $(p_base.σ)")
+        println(io, "  Θ = $(p_base.Θ)")
+        println(io, "  c₀ = $(p_base.c0)")
+        println(io, "  Hazard = $(meta.hazard)")
+        println(io, "  V* ≈ $(round(p_base.Vstar, digits=6))")
+        println(io, "  g ≈ $(round(p_base.g, digits=6))")
         println(io, "  β = $(p_base.beta)")
-        println(io, "  κ* = $(round(κ_star, digits=4))")
+        println(io, "  κ* = $(round(κ_star, digits=6))")
+        println(io, "  Theory: κ* = g σ² / (2 λ V*)")
+        theory_val = p_base.g * p_base.σ^2 / (2 * p_base.λ * p_base.Vstar)
+        println(io, "         = $(round(theory_val, digits=6)) (numerical check)")
         println(io, "")
         println(io, "Analysis Range:")
         println(io, "  κ ∈ [$(round(κ_min, digits=3)), $(round(κ_max, digits=3))]")
