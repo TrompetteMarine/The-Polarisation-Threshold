@@ -10,18 +10,44 @@ Usage:
 """
 
 #═══════════════════════════════════════════════════════════════════════════
-# IMPORTS - Only system dependencies
+# IMPORTS AND ENVIRONMENT PREPARATION
 #═══════════════════════════════════════════════════════════════════════════
 
+using Logging
 using Pkg
-Pkg.activate(".")
+
+const PROJECT_ROOT = normpath(joinpath(@__DIR__, ".."))
+const OUTPUT_ROOT  = normpath(joinpath(PROJECT_ROOT, "outputs"))
+
+Pkg.activate(PROJECT_ROOT)
+
+function ensure_project_dependencies()
+    try
+        Pkg.instantiate()
+    catch err
+        bt = catch_backtrace()
+        @error "Failed to instantiate project dependencies" exception=(err, bt)
+        exit(1)
+    end
+end
+
+ensure_project_dependencies()
+
+function safe_import(modsym::Symbol; pkgname::AbstractString=String(modsym))
+    try
+        @eval using $(modsym)
+    catch err
+        bt = catch_backtrace()
+        @error "Failed to load dependency $pkgname" exception=(err, bt)
+        exit(1)
+    end
+end
 
 using LinearAlgebra
 using Statistics
 using DifferentialEquations
 using FFTW
 using StatsBase
-using Logging
 using Printf
 using Dates
 using Base.Threads
@@ -75,23 +101,10 @@ end
 using .BeliefAnalysisCore.Types: Params, StepHazard, LogisticHazard
 using .BeliefAnalysisCore.Stats: estimate_Vstar, estimate_g, critical_kappa
 
-# Load YAML
-try
-    using YAML
-catch
-    @info "Installing YAML.jl..."
-    Pkg.add("YAML")
-    using YAML
-end
-
-# Load plotting backend
-try
-    using CairoMakie
-    using ColorSchemes
-catch e
-    @error "CairoMakie not available. Install with: Pkg.add(\"CairoMakie\")"
-    exit(1)
-end
+# Load YAML and plotting backend dependencies
+safe_import(:YAML; pkgname="YAML")
+safe_import(:CairoMakie; pkgname="CairoMakie")
+safe_import(:ColorSchemes; pkgname="ColorSchemes")
 
 # Load bifurcation modules
 include(joinpath(@__DIR__, "..", "src", "bifurcation", "model_interface.jl"))
@@ -105,6 +118,120 @@ using .PlottingCairo
 #═══════════════════════════════════════════════════════════════════════════
 
 """
+Ensure a YAML mapping has string keys for consistent access.
+"""
+function ensure_string_dict(value, context::AbstractString)
+    value isa AbstractDict || throw(ArgumentError("$context must be a mapping, got $(typeof(value))"))
+    return Dict(String(k) => v for (k, v) in value)
+end
+
+function coerce_string(value, context::AbstractString; allow_empty::Bool=false)
+    str = String(value)
+    str = strip(str)
+    if !allow_empty && isempty(str)
+        throw(ArgumentError("$context cannot be empty"))
+    end
+    return str
+end
+
+function expect_string!(dict::AbstractDict, key::AbstractString; default::Union{Nothing,AbstractString}=nothing,
+                         allow_empty::Bool=false, context::AbstractString=key)
+    value = if haskey(dict, key)
+        dict[key]
+    elseif default === nothing
+        throw(ArgumentError("Missing required field: $context"))
+    else
+        default
+    end
+    str = coerce_string(value, context; allow_empty=allow_empty)
+    dict[key] = str
+    return str
+end
+
+function coerce_real(value, context::AbstractString)
+    num = if value isa Real
+        Float64(value)
+    elseif value isa AbstractString
+        parsed = tryparse(Float64, value)
+        parsed === nothing && throw(ArgumentError("$context must be numeric, got '$value'"))
+        parsed
+    else
+        throw(ArgumentError("$context must be numeric, got $(typeof(value))"))
+    end
+    isfinite(num) || throw(ArgumentError("$context must be finite"))
+    return num
+end
+
+function expect_real!(dict::AbstractDict, key::AbstractString; min::Real=-Inf, max::Real=Inf,
+                      default::Union{Nothing,Real,AbstractString}=nothing, context::AbstractString=key)
+    value = if haskey(dict, key)
+        dict[key]
+    elseif default === nothing
+        throw(ArgumentError("Missing required field: $context"))
+    else
+        default
+    end
+    num = coerce_real(value, context)
+    if num < min || num > max
+        throw(ArgumentError("$context must be between $min and $max, got $num"))
+    end
+    dict[key] = num
+    return num
+end
+
+function expect_int!(dict::AbstractDict, key::AbstractString; min::Integer=typemin(Int),
+                     max::Integer=typemax(Int), default=nothing, context::AbstractString=key)
+    value = if haskey(dict, key)
+        dict[key]
+    elseif default === nothing
+        throw(ArgumentError("Missing required field: $context"))
+    else
+        default
+    end
+
+    num = if value isa Integer
+        Int(value)
+    elseif value isa Real
+        rounded = round(Int, value)
+        abs(value - rounded) <= eps(Base.max(abs(value), 1.0)) || throw(ArgumentError("$context must be an integer, got $value"))
+        rounded
+    elseif value isa AbstractString
+        parsed = tryparse(Int, value)
+        parsed === nothing && throw(ArgumentError("$context must be an integer, got '$value'"))
+        parsed
+    else
+        throw(ArgumentError("$context must be an integer, got $(typeof(value))"))
+    end
+
+    if num < min || num > max
+        throw(ArgumentError("$context must be between $min and $max, got $num"))
+    end
+
+    dict[key] = num
+    return num
+end
+
+function sanitize_output_dir(raw::AbstractString)
+    mkpath(OUTPUT_ROOT)
+    candidate = normpath(isabspath(raw) ? raw : joinpath(PROJECT_ROOT, raw))
+    rel_project = relpath(candidate, PROJECT_ROOT)
+    if startswith(rel_project, "..")
+        throw(ArgumentError("output_dir must reside inside the project directory: $raw"))
+    end
+    rel_output = relpath(candidate, OUTPUT_ROOT)
+    if startswith(rel_output, "..")
+        throw(ArgumentError("output_dir must be within $(OUTPUT_ROOT). Received: $raw"))
+    end
+    return candidate
+end
+
+function sanitize_run_name(name_in)
+    name = coerce_string(name_in, "name"; allow_empty=false)
+    sanitized = replace(name, r"[^A-Za-z0-9_.-]" => "_")
+    return isempty(sanitized) ? "config" : sanitized
+end
+
+"""
 Load and validate YAML configuration
 """
 function load_yaml_config(filepath::String)
@@ -112,25 +239,66 @@ function load_yaml_config(filepath::String)
         throw(ArgumentError("Config file not found: $filepath"))
     end
     
-    cfg = YAML.load_file(filepath)
-    
+    cfg_raw = YAML.load_file(filepath)
+    cfg = ensure_string_dict(cfg_raw, "root")
+
     # Validate required fields
     required_fields = ["params", "N", "T", "dt", "output_dir"]
     for field in required_fields
-        if !haskey(cfg, field)
-            throw(ArgumentError("Missing required field: $field"))
-        end
+        haskey(cfg, field) || throw(ArgumentError("Missing required field: $field"))
     end
-    
-    # Extract and validate parameters
+
+    cfg["params"] = ensure_string_dict(cfg["params"], "params")
     params = cfg["params"]
-    required_params = ["lambda", "sigma", "theta", "c0", "hazard"]
-    for param in required_params
-        if !haskey(params, param)
-            throw(ArgumentError("Missing required parameter: $param"))
-        end
+
+    for param in ["lambda", "sigma", "theta", "c0", "hazard"]
+        haskey(params, param) || throw(ArgumentError("Missing required parameter: $param"))
     end
-    
+
+    expect_real!(params, "lambda"; context="params.lambda")
+    expect_real!(params, "sigma"; min=0.0, context="params.sigma")
+    expect_real!(params, "theta"; context="params.theta")
+    expect_real!(params, "c0"; context="params.c0")
+
+    hazard_cfg = ensure_string_dict(params["hazard"], "params.hazard")
+    kind = lowercase(expect_string!(hazard_cfg, "kind"; context="params.hazard.kind"))
+    if kind == "step"
+        expect_real!(hazard_cfg, "nu0"; context="params.hazard.nu0")
+    elseif kind == "logistic"
+        expect_real!(hazard_cfg, "numax"; context="params.hazard.numax")
+        expect_real!(hazard_cfg, "beta"; context="params.hazard.beta")
+    else
+        throw(ArgumentError("Unsupported hazard kind: $(hazard_cfg["kind"]) — use 'step' or 'logistic'."))
+    end
+    hazard_cfg["kind"] = kind
+    params["hazard"] = hazard_cfg
+
+    cfg["N"] = expect_int!(cfg, "N"; min=2, context="N")
+    cfg["T"] = expect_real!(cfg, "T"; min=0.0, context="T")
+    cfg["dt"] = expect_real!(cfg, "dt"; min=1e-6, context="dt")
+    cfg["burn_in"] = expect_int!(cfg, "burn_in"; min=0, default=0, context="burn_in")
+    cfg["seed"] = expect_int!(cfg, "seed"; default=0, context="seed")
+
+    outdir_raw = expect_string!(cfg, "output_dir"; context="output_dir")
+    cfg["output_dir"] = sanitize_output_dir(outdir_raw)
+
+    if haskey(cfg, "sweep")
+        sweep_cfg = ensure_string_dict(cfg["sweep"], "sweep")
+        if haskey(sweep_cfg, "points")
+            sweep_cfg["points"] = expect_int!(sweep_cfg, "points"; min=2, context="sweep.points")
+        end
+        for key in ["kappa_from", "kappa_to", "kappa_from_factor_of_kstar", "kappa_to_factor_of_kstar"]
+            if haskey(sweep_cfg, key)
+                expect_real!(sweep_cfg, key; context="sweep.$key")
+            end
+        end
+        cfg["sweep"] = sweep_cfg
+    end
+
+    if haskey(cfg, "name")
+        cfg["name"] = sanitize_run_name(cfg["name"])
+    end
+
     return cfg
 end
 
@@ -1077,7 +1245,7 @@ function analyze_config(config_path::String)
 
     # Load configuration
     cfg = load_yaml_config(config_path)
-    config_name = get(cfg, "name", splitext(basename(config_path))[1])
+    config_name = haskey(cfg, "name") ? cfg["name"] : sanitize_run_name(splitext(basename(config_path))[1])
 
     @info "Configuration: $config_name"
     @info "  λ = $(cfg["params"]["lambda"])"
@@ -1323,10 +1491,10 @@ function analyze_all(config_dir::String="configs")
     all_results = Dict{String, Any}()
     
     for config_file in yaml_files
-        config_name = splitext(basename(config_file))[1]
+        config_name = sanitize_run_name(splitext(basename(config_file))[1])
         @info ""
         @info "Processing: $config_name"
-        
+
         try
             results = analyze_config(config_file)
             all_results[config_name] = results
