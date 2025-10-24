@@ -300,6 +300,132 @@ function classify_attractor(u0::Vector{Float64}, p; tmax=500.0)
 end
 
 """
+Integrate from u0 until it lands ε-close to an attractor or tmax is reached.
+Returns (label, t_hit) with label ∈ {-1,0,+1} or NaN if integration failed.
+label = 0 → consensus, ±1 → polarized branches (sign = sign of odd mode).
+"""
+function classify_flow(u0_in::AbstractVector{<:Real}, p;
+                       tmax::Float64=300.0, dt::Float64=0.05, ε::Float64=1e-3)
+    # ensure a concrete Vector{Float64}
+    u0 = Vector{Float64}(u0_in)
+
+    # precompute target equilibria
+    pol_eqs_raw = ModelInterface.polarized_equilibria(p)    # may return vectors/tuples
+    pol_eqs = [Vector{Float64}(e) for e in pol_eqs_raw]
+    consensus = zeros(2)
+
+    function ode!(du, u, p, t)
+        du .= ModelInterface.f(u, p)
+    end
+
+    prob = ODEProblem(ode!, u0, (0.0, tmax), p)
+    integ = init(prob, Tsit5(); dt=dt, save_everystep=false)  # fast stepping
+
+    t = 0.0
+    try
+        while t < tmax
+            step!(integ)
+            u = integ.u
+            t = integ.t
+
+            # consensus check
+            if norm(u .- consensus) < ε
+                return (0, t)
+            end
+            # polarized check
+            if !isempty(pol_eqs)
+                dmin, arg = findmin(map(e -> norm(u .- e), pol_eqs))
+                if dmin < ε
+                    s = sign(0.5 * (pol_eqs[arg][1] - pol_eqs[arg][2]))
+                    return (s ≥ 0 ? 1 : -1, t)
+                end
+            end
+        end
+    catch
+        return (NaN, t)   # integration failure → mark as NaN
+    end
+
+    # fallback classification: sign of odd mode at final time
+    odd = 0.5 * (integ.u[1] - integ.u[2])
+    lab = abs(odd) < 5ε ? 0 : (odd > 0 ? 1 : -1)
+    return (lab, tmax)
+end
+
+"""
+Compute a supersampled basin grid and convergence times.
+Supersampling (ss≥1) anti-aliases boundaries (majority vote on labels).
+Returns (xs, ys, labels::Matrix{Int8}, times::Matrix{Float32})
+"""
+function compute_basin_grid(κ::Real, p_base; xmin=-3.0, xmax=3.0, ymin=-3.0, ymax=3.0,
+                            res::Int=250, ss::Int=2, tmax::Float64=300.0,
+                            dt::Float64=0.05, ε::Float64=1e-3)
+    p   = ModelInterface.kappa_set(p_base, κ)
+    xs  = range(xmin, xmax; length=res)
+    ys  = range(ymin, ymax; length=res)
+    dx  = step(xs);  dy = step(ys)
+
+    labels = Matrix{Int8}(undef, res, res)
+    times  = Matrix{Float32}(undef, res, res)
+
+    Threads.@threads for i in 1:res
+        for j in 1:res
+            labs = Int8[]
+            ts   = Float64[]
+            # supersample at subcell centers
+            for a in 0:ss-1, b in 0:ss-1
+                x = xs[i] + (a + 0.5)/ss * dx - 0.5*dx
+                y = ys[j] + (b + 0.5)/ss * dy - 0.5*dy
+                lab, thit = classify_flow([x, y], p; tmax=tmax, dt=dt, ε=ε)
+                push!(labs, Int8(isnan(lab) ? 0 : lab))
+                push!(ts,  thit)
+            end
+            # majority vote for label; mean for time
+            labels[i, j] = StatsBase.mode(labs)
+            times[i, j]  = Float32(mean(ts))
+        end
+    end
+    return xs, ys, labels, times
+end
+
+
+# Lightweight vector-field overlay that doesn't depend on PlottingCairo internals
+function overlay_vectorfield!(ax, f::Function, p;
+                              lims::NTuple{4,Float64}=(-3.0, 3.0, -3.0, 3.0),
+                              density::Int=28, scale::Float64=0.12)
+    xmin, xmax, ymin, ymax = lims
+    xs = range(xmin, xmax; length=density)
+    ys = range(ymin, ymax; length=density)
+
+    # build grids
+    X = repeat(collect(xs)', length(ys), 1)
+    Y = repeat(collect(ys),  1, length(xs))
+    U = similar(X); V = similar(Y)
+
+    # normalize vectors and scale to figure size
+    L = scale * min(xmax - xmin, ymax - ymin)
+    for j in axes(X, 1), i in axes(X, 2)
+        x = X[j, i]; y = Y[j, i]
+        F = f([x, y], p)
+        fx, fy = F[1], F[2]
+        m = hypot(fx, fy)
+        if m > 0
+            U[j, i] = (fx / m) * L
+            V[j, i] = (fy / m) * L
+        else
+            U[j, i] = 0.0; V[j, i] = 0.0
+        end
+    end
+
+    # Use arrows2d! (no deprecation), with explicit positions/directions
+    # Point2f / Vec2f are available via CairoMakie / Makie
+    positions  = Point2f.(X, Y)
+    directions = Vec2f.(U, V)
+    arrows2d!(ax, positions, directions; linewidth=0.8, tipwidth=6, tiplength=10, color=:gray55)
+    return nothing
+end
+
+
+"""
 Compute Lyapunov exponent
 """
 function compute_lyapunov(f::Function, jac::Function, u0::Vector{Float64}, p;
@@ -386,6 +512,27 @@ function format_ratio_label(κ::Real, κ_star::Real; digits_ratio::Int=3, digits
         return Printf.format(fmt, κ)
     end
 end
+
+"""
+Batch-means standard error for a (possibly autocorrelated) series.
+Splits x into nb batches (default 10) and returns the SE of batch means.
+"""
+function batch_means_se(x::AbstractVector{<:Real}; nb::Int=10)
+    n = length(x)
+    nb = clamp(nb, 2, min(50, n))               # keep sane
+    L  = ceil(Int, n / nb)
+    bmeans = Float64[]
+    for i in 1:nb
+        lo = 1 + (i-1)*L
+        hi = min(n, i*L)
+        lo > hi && break
+        push!(bmeans, mean(@view x[lo:hi]))
+    end
+    nb_eff = length(bmeans)
+    nb_eff ≥ 2 || return 0.0
+    return std(bmeans) / sqrt(nb_eff)
+end
+
 
 #═══════════════════════════════════════════════════════════════════════════
 # PLOTTING FUNCTIONS
@@ -510,7 +657,7 @@ function plot_phase_portraits(κ_values, p_base)
         
         # Vector field
         PlottingCairo.phase_portrait!(ax, ModelInterface.f, p;
-                                     lims=(-3, 3, -3, 3),
+                                     lims=(-3.0, 3.0, -3.0, 3.0),
                                      density=35, alpha=0.25)
         
         # Consensus line
@@ -547,145 +694,200 @@ function plot_phase_portraits(κ_values, p_base)
 end
 
 """
-Plot 3: Basins of attraction
+Plot 3: Publication-grade basins of attraction.
+Left column: categorical basins with crisp separatrices (contours at -0.5,0,0.5),
+vector field overlay, and equilibria markers. Right column: log10 convergence time.
 """
-function plot_basins(κ_values, p_base; resolution=50)
-    @info "  Computing basins of attraction..."
-    
-    n = length(κ_values)
-    fig = Figure(size=(1400, 700 * ceil(Int, n/2)))
-    
-    u1_range = range(-3, 3, length=resolution)
-    u2_range = range(-3, 3, length=resolution)
-    
-    for (idx, κ) in enumerate(κ_values)
-        p = ModelInterface.kappa_set(p_base, κ)
-        
-        row = div(idx - 1, 2) + 1
-        col = mod(idx - 1, 2) + 1
-        
-        κ_star = getproperty(p, :kstar)
-        ax = Axis(fig[row, col];
-                 xlabel="Initial u₁",
-                 ylabel="Initial u₂",
-                 title="Basin: " * format_ratio_label(κ, κ_star),
-                 aspect=DataAspect())
-        
-        basin_map = zeros(resolution, resolution)
-        
-        @info "    κ=$κ..."
-        Threads.@threads for i in 1:resolution
-            for j in 1:resolution
-                u0 = [u1_range[i], u2_range[j]]
-                basin_map[i, j] = classify_attractor(u0, p; tmax=300.0)
-            end
+function plot_basins(κ_values, p_base; resolution::Int=300,
+                     domain=(-3.0, 3.0, -3.0, 3.0),
+                     supersample::Int=2, tmax::Float64=300.0, dt::Float64=0.05,
+                     ε::Float64=1e-3)
+    @info "  Computing publication-grade basins (res=$resolution, ss=$supersample)..."
+    nκ = length(κ_values)
+    rows = nκ
+    fig = Figure(size=(1600, 420 * rows))
+
+    for (row, κ) in enumerate(κ_values)
+        κ_star = getproperty(p_base, :kstar)
+        title_str = "Basin: " * format_ratio_label(κ, κ_star; digits_ratio=3)
+        xmin, xmax, ymin, ymax = domain
+        xs, ys, lab, tmat = compute_basin_grid(κ, p_base;
+                                               xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax,
+                                               res=resolution, ss=supersample,
+                                               tmax=tmax, dt=dt, ε=ε)
+        labT   = permutedims(lab, (2, 1))         # labels, Int8 but transposed for plotting
+        labTf  = Float64.(labT)                   # Float64 copy for line-contours
+        tlog   = log10.(max.(1e-3f0, tmat))
+        tlogT  = permutedims(tlog, (2, 1))
+
+
+        # ---- Left: categorical basin map with separatrices ----
+        axL = Axis(fig[row, 1];
+                   title=title_str, xlabel="u₁", ylabel="u₂", aspect=DataAspect(),
+                   xgridvisible=false, ygridvisible=false)
+
+       # Left: categorical basins
+        heatmap!(axL, xs, ys, labT; colorrange=(-1.0, 1.0), colormap=Reverse(:RdBu))
+        # Draw line contours (Float64 grid ⇒ line recipe; linewidth is valid)
+        contour!(axL, xs, ys, labTf; levels=[-0.5, 0.0, 0.5],
+                color=:black, linewidth=1.4)
+
+        # Right: convergence time (log10)
+        hm = heatmap!(axR, xs, ys, tlogT; colormap=:viridis)
+        # Reuse line-contours
+        contour!(axR, xs, ys, labTf; levels=[-0.5, 0.0, 0.5],
+                color=:black, linewidth=1.2)
+
+        # light vector field overlay (from your plotting util)
+        # light vector field overlay (self-contained)
+        # overlay (self-contained)
+        overlay_vectorfield!(axL, ModelInterface.f,
+                            ModelInterface.kappa_set(p_base, κ);
+                            lims=(xmin, xmax, ymin, ymax), density=28, scale=0.12)
+
+        # diagonal consensus line
+        lines!(axL, [xmin, xmax], [xmin, xmax]; color=:gray65, linestyle=:dash, linewidth=1.0)
+
+                # mark equilibria
+        pκ = ModelInterface.kappa_set(p_base, κ)
+        scatter!(axL, [0.0], [0.0]; color=:forestgreen, marker=:circle, markersize=13, strokewidth=0.5, label="Consensus")
+        for (k, ueq) in enumerate(ModelInterface.polarized_equilibria(pκ))
+            scatter!(axL, [ueq[1]], [ueq[2]];
+                     color=:firebrick, marker=:rect, markersize=12, strokewidth=0.5,
+                     label=k==1 ? "Polarized" : nothing)
         end
-        
-        hm = heatmap!(ax, u1_range, u2_range, basin_map';
-                     colormap=:RdBu, colorrange=(-1.2, 1.2))
-        
-        lines!(ax, [-3, 3], [-3, 3]; color=:black, linestyle=:dash, linewidth=1)
-        
-        if col == 2 || idx == n
-            Colorbar(fig[row, col+1], hm; label="Attractor",
-                    ticks=([-1, 0, 1], ["Neg.", "Consensus", "Pos."]))
-        end
+        axislegend(axL, position=:lb)
+
+        # ---- Right: convergence time map (log scale) ----
+        axR = Axis(fig[row, 2];
+                   title="Convergence time (log₁₀ seconds)",
+                   xlabel="u₁", ylabel="u₂", aspect=DataAspect(),
+                   xgridvisible=false, ygridvisible=false)
+        # avoid zeros in log
+        tlog = log10.(max.(1e-3f0, tmat))
+        hm = heatmap!(axR, xs, ys, Matrix(tlog)'; colormap=:viridis)
+        # reuse separatrix to show slow regions near boundaries
+        contour!(axR, xs, ys, Matrix(lab)'; levels=[-0.5, 0.0, 0.5],
+                 color=:black, linewidth=1.2)
+        Colorbar(fig[row, 3], hm)
+
+        # clean limits
+        xlims!(axL, xmin, xmax); ylims!(axL, ymin, ymax)
+        xlims!(axR, xmin, xmax); ylims!(axR, ymin, ymax)
     end
-    
-    return fig
+
+    fig
 end
 
+
 """
-Plot 4: Time series analysis
+Plot 4: Time series analysis (annotated).
+Adds near-threshold diagnostics: steady polarization p̄ (± CI),
+prediction p̂ = sqrt((κ-κ*)/κ*), ratio r = p̄/p̂, and relaxation time τ_c.
+Also overlays ±p̂ on the polarization panel when κ>κ*.
 """
 function plot_timeseries(κ, p_base; u0=[0.5, -0.5], tmax=500.0, dt=0.1)
     @info "  Analyzing time series for κ=$κ..."
-    
     p = ModelInterface.kappa_set(p_base, κ)
-    
+    κ_star = getproperty(p, :kstar)
+
+    # ODE
     function ode!(du, u, p, t)
-        F = ModelInterface.f(u, p)
-        du .= F
+        du .= ModelInterface.f(u, p)
     end
-    
-    prob = ODEProblem(ode!, u0, (0.0, tmax), p)
-    sol = solve(prob, Tsit5(); saveat=dt)
-    
-    t = sol.t
-    traj = reduce(hcat, sol.u)
-    u1, u2 = traj[1, :], traj[2, :]
-    mean_traj = (u1 .+ u2) ./ 2
-    pol_traj = 0.5 .* (u1 .- u2)
-    
+    sol = solve(ODEProblem(ode!, u0, (0.0, tmax), p), Tsit5(); saveat=dt)
+
+    # Extract series
+    t   = sol.t
+    U   = reduce(hcat, sol.u)
+    u1  = vec(U[1, :]);  u2 = vec(U[2, :])
+    m   = (u1 .+ u2) ./ 2
+    pol = 0.5 .* (u1 .- u2)           # signed odd mode
+    pabs = abs.(pol)                   # amplitude
+
+    # --- Diagnostics ---
+    T  = length(pabs)
+    B  = fld(6T, 10)                   # 60% burn-in
+    post = pabs[B+1:end]
+    pbar = mean(post)
+    se   = batch_means_se(post; nb=10)
+
+    # ACF(1) on the transient (or whole series if too short)
+    acf1_slice = (B ≥ 10) ? pol[1:B] : pol
+    ρ1  = cor(acf1_slice[1:end-1], acf1_slice[2:end])
+    ρ1  = clamp(isfinite(ρ1) ? ρ1 : 0.0, 1e-6, 0.999)
+    τc  = -1 / log(ρ1)                 # relaxation time proxy
+
+    # Near-threshold prediction (normal-form calibration used in yaml_to_model_params)
+    p̂ = (isfinite(κ_star) && κ > κ_star) ? sqrt((κ - κ_star)/κ_star) : 0.0
+    r  = (p̂ > 0) ? pbar / p̂ : NaN
+
+    # --- Figure ---
     fig = Figure(size=(1600, 1200))
+    label_ratio = format_ratio_label(κ, κ_star; digits_ratio=3)
 
-    label_ratio = format_ratio_label(κ, getproperty(p, :kstar); digits_ratio=3)
-
-    # Panel 1: Time series
-    ax1 = Axis(fig[1, 1:2];
-              xlabel="Time", ylabel="Belief",
-              title="Evolution: " * label_ratio)
-    
-    lines!(ax1, t, u1; linewidth=1.5, color=:blue, label="Agent 1")
-    lines!(ax1, t, u2; linewidth=1.5, color=:red, label="Agent 2")
-    lines!(ax1, t, mean_traj; linewidth=2, color=:green, label="Mean")
+    # Panel 1: beliefs
+    ax1 = Axis(fig[1, 1:2]; xlabel="Time", ylabel="Belief",
+               title="Evolution: " * label_ratio)
+    lines!(ax1, t, u1;  color=:blue,  linewidth=1.8, label="Agent 1")
+    lines!(ax1, t, u2;  color=:red,   linewidth=1.8, label="Agent 2")
+    lines!(ax1, t, m;   color=:green, linewidth=2.0, label="Mean")
     hlines!(ax1, [0]; color=:black, linestyle=:dash, linewidth=1)
     axislegend(ax1, position=:rt)
-    
-    # Panel 2: Polarization
-    ax2 = Axis(fig[2, 1]; xlabel="Time", ylabel="|u₁ - u₂|/2",
-              title="Polarization")
 
-    polarization = abs.(pol_traj)
-    lines!(ax2, t, polarization; linewidth=1.5, color=:purple)
-    
-    # Panel 3: Distance from origin
-    ax3 = Axis(fig[2, 2]; xlabel="Time", ylabel="||u||",
-              title="State Magnitude")
-    
-    distance = sqrt.(u1.^2 .+ u2.^2)
-    lines!(ax3, t, distance; linewidth=1.5, color=:green)
-    
-    # Panel 4: Autocorrelation
-    ax4 = Axis(fig[3, 1]; xlabel="Lag", ylabel="ACF",
-              title="Autocorrelation")
-    
-    max_lag = min(500, length(pol_traj) ÷ 4)
-    acf = autocorrelation(pol_traj, max_lag)
-    lines!(ax4, (0:max_lag) .* dt, acf; linewidth=2, color=:blue)
-    hlines!(ax4, [0]; color=:black, linestyle=:dash, linewidth=1)
-    
-    # Panel 5: Power spectrum
-    ax5 = Axis(fig[3, 2]; xlabel="Frequency", ylabel="Power",
-              title="Spectrum", xscale=log10, yscale=log10)
-    
-    freqs, psd = compute_psd(pol_traj, dt)
-    valid = (freqs .> 0) .& (psd .> 1e-12)
-    lines!(ax5, freqs[valid], psd[valid]; linewidth=2, color=:blue)
-    
-    # Panel 6: Phase space
-    ax6 = Axis(fig[4, 1:2]; xlabel="u₁", ylabel="u₂",
-              title="Phase Trajectory", aspect=DataAspect())
-    
-    stride = max(1, length(u1) ÷ 2000)
-    u1_plot = u1[1:stride:end]
-    u2_plot = u2[1:stride:end]
-    
-    n_seg = length(u1_plot) - 1
-    colors = range(colorant"blue", colorant"red", length=n_seg)
-    
-    for i in 1:n_seg
-        lines!(ax6, u1_plot[i:i+1], u2_plot[i:i+1];
-              linewidth=1.5, color=colors[i])
+    # Annotation block on the top panel
+    ratio = isfinite(κ_star) && κ_star>0 ? round(κ/κ_star, digits=2) : NaN
+    info_lines = String[
+        "κ/κ* = $(isnan(ratio) ? "—" : string(ratio))",
+        "p̄ = $(round(pbar,digits=3)) ± $(round(1.96*se,digits=3))",
+        "τ_c ≈ $(round(τc,digits=1))  (ρ₁=$(round(ρ1,digits=3)))"
+    ]
+    if κ > κ_star
+        push!(info_lines, "p̂ = $(round(p̂,digits=3));  r = $(round(r,digits=2))")
     end
-    
+    txt = join(info_lines, "   |   ")
+    xmax = maximum(t)
+    ymax = maximum(vcat(u1, u2))
+    text!(ax1, xmax*0.60, ymax - 0.05*(abs(ymax)+1e-6); text=txt, align=(:left,:top), fontsize=12)
+
+    # Panel 2: polarization amplitude
+    ax2 = Axis(fig[2, 1]; xlabel="Time", ylabel="|u₁ - u₂|/2", title="Polarization")
+    lines!(ax2, t, pabs; color=:purple, linewidth=1.8, label="|u₁-u₂|/2")
+    if κ > κ_star && p̂ > 0
+        hlines!(ax2, [p̂, -p̂]; color=:red, linestyle=:dash, linewidth=1.5)
+        text!(ax2, t[end]*0.80, p̂*(1 + 0.05); text="p̂", fontsize=11, color=:red)
+    end
+
+    # Panel 3: state magnitude
+    ax3 = Axis(fig[2, 2]; xlabel="Time", ylabel="‖u‖", title="State Magnitude")
+    lines!(ax3, t, sqrt.(u1.^2 .+ u2.^2); color=:green, linewidth=1.8)
+
+    # Panel 4: ACF (lags in time units)
+    ax4 = Axis(fig[3, 1]; xlabel="Lag", ylabel="ACF", title="Autocorrelation")
+    max_lag = min(500, length(pol) ÷ 4)
+    acf = autocorrelation(pol, max_lag)
+    lines!(ax4, (0:max_lag) .* dt, acf; color=:blue, linewidth=2)
+    hlines!(ax4, [0.0]; color=:black, linestyle=:dash, linewidth=1)
+
+    # Panel 5: spectrum (log–log)
+    ax5 = Axis(fig[3, 2]; xlabel="Frequency", ylabel="Power", title="Spectrum",
+               xscale=log10, yscale=log10)
+    freqs, psd = compute_psd(pol, dt)
+    valid = (freqs .> 0) .& (psd .> 1e-12)
+    lines!(ax5, freqs[valid], psd[valid]; color=:blue, linewidth=2)
+
+    # Panel 6: phase trajectory
+    ax6 = Axis(fig[4, 1:2]; xlabel="u₁", ylabel="u₂", title="Phase Trajectory", aspect=DataAspect())
+    stride = max(1, length(u1) ÷ 2000)
+    lines!(ax6, u1[1:stride:end], u2[1:stride:end]; color=:dodgerblue, linewidth=1.5)
     lines!(ax6, [-3, 3], [-3, 3]; color=:gray, linestyle=:dash, linewidth=1)
-    scatter!(ax6, [u1[1]], [u2[1]]; color=:blue, markersize=15, label="Start")
-    scatter!(ax6, [u1[end]], [u2[end]]; color=:red, markersize=15, label="End")
+    scatter!(ax6, [u1[1]],  [u2[1]];  color=:blue, markersize=13, label="Start")
+    scatter!(ax6, [u1[end]], [u2[end]]; color=:red,  markersize=13, label="End")
     axislegend(ax6, position=:lt)
-    
+
     return fig
 end
+
 
 """
 Plot 5: Return maps
@@ -849,7 +1051,7 @@ function plot_lyapunov(κ_range, p_base; tmax=2000.0)
     
     ax = Axis(fig[1, 1];
              xlabel="Coupling κ", ylabel="Lyapunov exponent λ",
-             title="Chaos Indicator")
+             title="Estimated leading eigenvalue ")
     
     lines!(ax, κ_vals, lyap_values; linewidth=3, color=:blue)
     hlines!(ax, [0]; color=:red, linestyle=:dash, linewidth=2)
