@@ -193,7 +193,7 @@ function expect_int!(dict::AbstractDict, key::AbstractString; min::Integer=typem
         Int(value)
     elseif value isa Real
         rounded = round(Int, value)
-        abs(value - rounded) <= eps(max(abs(value), 1.0)) || throw(ArgumentError("$context must be an integer, got $value"))
+        abs(value - rounded) <= eps(Base.max(abs(value), 1.0)) || throw(ArgumentError("$context must be an integer, got $value"))
         rounded
     elseif value isa AbstractString
         parsed = tryparse(Int, value)
