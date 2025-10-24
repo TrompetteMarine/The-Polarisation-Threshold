@@ -717,7 +717,7 @@ function plot_basins(κ_values, p_base; resolution::Int=300,
                                                tmax=tmax, dt=dt, ε=ε)
         labT   = permutedims(lab, (2, 1))         # labels, Int8 but transposed for plotting
         labTf  = Float64.(labT)                   # Float64 copy for line-contours
-        tlog   = log10.(max.(1e-3f0, tmat))
+        tlog   = log10.(max.(1e-3, tmat))
         tlogT  = permutedims(tlog, (2, 1))
 
 
@@ -726,17 +726,11 @@ function plot_basins(κ_values, p_base; resolution::Int=300,
                    title=title_str, xlabel="u₁", ylabel="u₂", aspect=DataAspect(),
                    xgridvisible=false, ygridvisible=false)
 
-       # Left: categorical basins
+        # Left: categorical basins
         heatmap!(axL, xs, ys, labT; colorrange=(-1.0, 1.0), colormap=Reverse(:RdBu))
         # Draw line contours (Float64 grid ⇒ line recipe; linewidth is valid)
         contour!(axL, xs, ys, labTf; levels=[-0.5, 0.0, 0.5],
                 color=:black, linewidth=1.4)
-
-        # Right: convergence time (log10)
-        hm = heatmap!(axR, xs, ys, tlogT; colormap=:viridis)
-        # Reuse line-contours
-        contour!(axR, xs, ys, labTf; levels=[-0.5, 0.0, 0.5],
-                color=:black, linewidth=1.2)
 
         # light vector field overlay (from your plotting util)
         # light vector field overlay (self-contained)
@@ -748,7 +742,7 @@ function plot_basins(κ_values, p_base; resolution::Int=300,
         # diagonal consensus line
         lines!(axL, [xmin, xmax], [xmin, xmax]; color=:gray65, linestyle=:dash, linewidth=1.0)
 
-                # mark equilibria
+        # mark equilibria
         pκ = ModelInterface.kappa_set(p_base, κ)
         scatter!(axL, [0.0], [0.0]; color=:forestgreen, marker=:circle, markersize=13, strokewidth=0.5, label="Consensus")
         for (k, ueq) in enumerate(ModelInterface.polarized_equilibria(pκ))
@@ -763,11 +757,9 @@ function plot_basins(κ_values, p_base; resolution::Int=300,
                    title="Convergence time (log₁₀ seconds)",
                    xlabel="u₁", ylabel="u₂", aspect=DataAspect(),
                    xgridvisible=false, ygridvisible=false)
-        # avoid zeros in log
-        tlog = log10.(max.(1e-3f0, tmat))
-        hm = heatmap!(axR, xs, ys, Matrix(tlog)'; colormap=:viridis)
+        hm = heatmap!(axR, xs, ys, tlogT; colormap=:viridis)
         # reuse separatrix to show slow regions near boundaries
-        contour!(axR, xs, ys, Matrix(lab)'; levels=[-0.5, 0.0, 0.5],
+        contour!(axR, xs, ys, labTf; levels=[-0.5, 0.0, 0.5],
                  color=:black, linewidth=1.2)
         Colorbar(fig[row, 3], hm)
 
