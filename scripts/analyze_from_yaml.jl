@@ -276,7 +276,7 @@ function load_yaml_config(filepath::String)
     cfg["N"] = expect_int!(cfg, "N"; min=2, context="N")
     cfg["T"] = expect_real!(cfg, "T"; min=0.0, context="T")
     cfg["dt"] = expect_real!(cfg, "dt"; min=1e-6, context="dt")
-    cfg["burn_in"] = expect_int!(cfg, "burn_in"; min=0, default=0, context="burn_in")
+    cfg["burn_in"] = expect_real!(cfg, "burn_in"; min=0, default=0, context="burn_in")
     cfg["seed"] = expect_int!(cfg, "seed"; default=0, context="seed")
 
     outdir_raw = expect_string!(cfg, "output_dir"; context="output_dir")
