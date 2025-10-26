@@ -47,13 +47,26 @@ end
 Attempt to load an optional dependency. Returns `true` if successful and
 `false` otherwise while keeping the script running.
 """
-function try_import(modsym::Symbol; pkgname::AbstractString=String(modsym))
+function try_import(modsym::Symbol; pkgname::AbstractString=String(modsym),
+                    install_hint::Union{Nothing,AbstractString}=nothing,
+                    min_julia::Union{Nothing,VersionNumber}=nothing)
     try
         @eval import $(modsym)
         return true
     catch err
         @info "Optional dependency $pkgname unavailable – falling back";
         @debug "Failed to load optional dependency" exception=(err, catch_backtrace())
+        pkgpath = Base.find_package(pkgname)
+        if pkgpath === nothing
+            suggestion = isnothing(install_hint) ?
+                "julia --project=. -e 'using Pkg; Pkg.add(\"$pkgname\")'" : install_hint
+            @info "  → Install with: $suggestion"
+        else
+            @info "  → Package detected at $pkgpath but failed to load"
+        end
+        if min_julia !== nothing && VERSION < min_julia
+            @info "  → Requires Julia $(min_julia) or newer (current $(VERSION))"
+        end
         return false
     end
 end
@@ -121,9 +134,21 @@ safe_import(:YAML; pkgname="YAML")
 safe_import(:CairoMakie; pkgname="CairoMakie")
 safe_import(:ColorSchemes; pkgname="ColorSchemes")
 
+# Diagnose optional BifurcationKit status early so users see actionable hints
+const BIFURCATIONKIT_AVAILABLE = try_import(:BifurcationKit; pkgname="BifurcationKit",
+                                            install_hint="julia --project=. -e 'using Pkg; Pkg.add(url=\"https://github.com/bifurcationkit/BifurcationKit.jl.git\")'",
+                                            min_julia=v"1.9")
+if BIFURCATIONKIT_AVAILABLE
+    @info "BifurcationKit detected – advanced continuation scripts remain enabled"
+else
+    @info "Proceeding without BifurcationKit-dependent features (builtin normal-form tools will be used)"
+end
+
 # Optional Attractors.jl integration for basin computations
-const ATTRACTORS_AVAILABLE = try_import(:Attractors; pkgname="Attractors") &&
-                             try_import(:DynamicalSystems; pkgname="DynamicalSystems")
+const ATTRACTORS_AVAILABLE = try_import(:Attractors; pkgname="Attractors",
+                                        install_hint="julia --project=. -e 'using Pkg; Pkg.add(\"Attractors\"); Pkg.add(\"DynamicalSystems\")'") &&
+                             try_import(:DynamicalSystems; pkgname="DynamicalSystems",
+                                        install_hint="julia --project=. -e 'using Pkg; Pkg.add(\"DynamicalSystems\")'")
 if ATTRACTORS_AVAILABLE
     @info "Attractors.jl detected – enabling advanced basin computation"
 else
@@ -1075,7 +1100,7 @@ function plot_basins(κ_values, p_base; resolution::Int=300,
 
         # Left: categorical basins
         heatmap!(axL, xs, ys, labT; colorrange=(-1.0, 1.0), colormap=Reverse(:RdBu))
-        # Draw line contours (Float64 grid ⇒ poly recipe ⇒ use linewidth)
+        # Draw line contours (poly recipe ⇒ strokewidth)
         contour!(axL, xs, ys, labTf; levels=[-0.5, 0.0, 0.5],
                 color=:black, linewidth=1.4)
 
