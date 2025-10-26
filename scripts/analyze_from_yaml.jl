@@ -792,7 +792,7 @@ function overlay_vectorfield!(ax, f::Function, p;
     # Point2f / Vec2f are available via CairoMakie / Makie
     positions  = Point2f.(X, Y)
     directions = Vec2f.(U, V)
-    arrows2d!(ax, positions, directions; linewidth=0.8, tipwidth=6, tiplength=10, color=:gray55)
+    arrows2d!(ax, positions, directions; shaftwidth=1.0, tipwidth=6, tiplength=10, color=:gray55)
     return nothing
 end
 
