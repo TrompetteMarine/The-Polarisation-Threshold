@@ -144,9 +144,11 @@ error when the package precompiles.【F:scripts/analyze_from_yaml.jl†L60-L77�
 
 1. Re-run the YAML analysis script. When it encounters the `subscript`
    redefinition it automatically patches the installed
-   `DynamicalSystemsVisualizations.jl` extension by rewriting the offending
-   assignment as a constant (creating a `.bak` backup the first time). The
-   script then retries the load transparently before continuing.【F:scripts/analyze_from_yaml.jl†L60-L139】
+   `DynamicalSystemsVisualizations.jl` extension by importing `UnicodeFun`,
+    binding `const _subscript = UnicodeFun.subscript`, removing any illegal
+    reassignments, and rewriting calls to use the alias (creating a `.bak`
+    backup the first time). The script prints a short summary of the edits and
+    then retries the load transparently before continuing.【F:scripts/analyze_from_yaml.jl†L60-L210】
 
 2. Update `DynamicalSystems.jl` (and therefore the extension) to a release that
    supports Julia 1.12:
@@ -161,14 +163,20 @@ error when the package precompiles.【F:scripts/analyze_from_yaml.jl†L60-L77�
 
 3. If you prefer a manual workaround, edit
    `~/.julia/packages/DynamicalSystems/*/ext/DynamicalSystemsVisualizations.jl`
-   and change the offending line to declare the lookup table as a constant:
+   so the extension imports `UnicodeFun`, defines the safe alias, and routes any
+   bare calls through it:
 
    ```julia
-   const subscript = Dict("0" => '₀', "1" => '₁', …)
+   import UnicodeFun
+   const _subscript = UnicodeFun.subscript
+   # ... later in the file ...
+   label = _subscript("1")
    ```
 
-   Precompile again afterwards. This mirrors the fix applied upstream until you
-   can update the package versions.
+   Ensure no `using UnicodeFun: subscript` imports or direct
+   `subscript = UnicodeFun.subscript` assignments remain. Precompile again
+   afterwards. This mirrors the fix applied upstream until you can update the
+   package versions.
 
 After any fix, rerun `julia --project=. scripts/analyze_from_yaml.jl …`. The
 script will prefer the full `DynamicalSystems.jl` module when it loads cleanly

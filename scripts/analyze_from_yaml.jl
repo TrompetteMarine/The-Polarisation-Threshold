@@ -62,7 +62,7 @@ function try_import(modsym::Symbol; pkgname::AbstractString=String(modsym),
             ext_path = locate_dsviz_extension()
             if ext_path !== nothing && patch_dsviz_subscript!(ext_path)
                 DSVIZ_PATCH_APPLIED[] = true
-                @info "  → Patched DynamicalSystemsVisualizations.subscript to use `const`"
+                @info "  → Patched DynamicalSystemsVisualizations.subscript to use a safe alias"
                 if isdefined(Base, :retry_load_extensions)
                     Base.retry_load_extensions()
                 end
@@ -104,29 +104,94 @@ function locate_dsviz_extension()
 end
 
 """
-Patch the DynamicalSystemsVisualizations extension so the `subscript` attribute is declared as a
-`const`, preventing Julia ≥ 1.10 from raising an "invalid assignment to constant" error during
-precompilation. Returns `true` when a patch is applied, `false` otherwise.
+Patch the DynamicalSystemsVisualizations extension so the `subscript` helper uses a stable alias
+to `UnicodeFun.subscript`. This prevents Julia ≥ 1.10 from raising an "invalid assignment to
+constant" error during precompilation. Returns `true` when a patch is applied, `false` otherwise.
 """
 function patch_dsviz_subscript!(ext_path::AbstractString)
     contents = read(ext_path, String)
-    occursin("const subscript", contents) && return false
+    occursin("const _subscript = UnicodeFun.subscript", contents) && return false
 
-    pattern = r"(?m)^(\s*)subscript\s*="
-    m = findfirst(pattern, contents)
-    m === nothing && return false
+    lines = collect(eachline(IOBuffer(contents); keep=true))
+    summaries = String[]
+    changed = false
 
-    first_idx = firstindex(contents)
-    last_idx = lastindex(contents)
-    prefix = m.first > first_idx ? contents[first_idx:m.first-1] : ""
-    suffix = m.last < last_idx ? contents[m.last+1:last_idx] : ""
-    match_obj = match(pattern, contents[m.first:m.last])
-    indent = match_obj === nothing ? "" : match_obj.captures[1]
+    split_line(line) = endswith(line, "\n") ? (line[1:end-1], "\n") : (line, "")
+    line_body(line) = first(split_line(line))
 
-    patched = String[]
-    push!(patched, prefix)
-    push!(patched, indent * "const subscript =")
-    push!(patched, suffix)
+    import_pattern = r"^(\s*(?:using|import)\s+UnicodeFun\s*:\s*)(.*)$"
+    removed_imports = 0
+    for i in eachindex(lines)
+        body, nl = split_line(lines[i])
+        m = match(import_pattern, body)
+        m === nothing && continue
+
+        head, tail = m.captures
+        names = split(tail, ",")
+        filtered = [strip(name) for name in names if strip(name) != "subscript"]
+        length(filtered) == length(names) && continue
+
+        removed_imports += 1
+        changed = true
+        if !isempty(filtered)
+            lines[i] = string(head, join(filtered, ", "), nl)
+        else
+            bare = match(r"^(\s*(?:using|import)\s+UnicodeFun)", head)
+            bare_text = bare === nothing ? "import UnicodeFun" : bare.captures[1]
+            lines[i] = string(bare_text, nl)
+        end
+    end
+    if removed_imports > 0
+        plural = removed_imports == 1 ? "" : "s"
+        push!(summaries, "Removed direct import of `subscript` from UnicodeFun ($(removed_imports) line$plural).")
+    end
+
+    has_unicodefun_import = any(occursin(r"^\s*(?:using|import)\s+UnicodeFun\b", line_body(line)) for line in lines)
+    if !has_unicodefun_import
+        module_idx = findfirst(line -> occursin(r"^\s*module\s+DynamicalSystemsVisualizations\b", line_body(line)), lines)
+        insert_pos = module_idx === nothing ? 1 : module_idx + 1
+        insert!(lines, insert_pos, "import UnicodeFun\n")
+        changed = true
+        push!(summaries, "Inserted `import UnicodeFun`.")
+    end
+
+    rebind_pattern = r"^\s*(?:const\s+)?subscript\s*=\s*UnicodeFun\.subscript\b"
+    removed_rebinds = 0
+    for i in eachindex(lines)
+        body, nl = split_line(lines[i])
+        occursin(rebind_pattern, body) || continue
+        lines[i] = nl
+        removed_rebinds += 1
+        changed = true
+    end
+    if removed_rebinds > 0
+        plural = removed_rebinds == 1 ? "" : "s"
+        push!(summaries, "Removed $(removed_rebinds) illegal rebind$plural of `subscript`.")
+    end
+
+    alias_line = "const _subscript = UnicodeFun.subscript\n"
+    alias_body = chop(alias_line; tail=1)
+    has_alias = any(line_body(line) == alias_body for line in lines)
+    if !has_alias
+        import_idx = findfirst(line -> occursin(r"^\s*(?:using|import)\s+UnicodeFun\b", line_body(line)), lines)
+        insert_pos = import_idx === nothing ? 1 : import_idx + 1
+        insert!(lines, insert_pos, alias_line)
+        changed = true
+        push!(summaries, "Added `const _subscript = UnicodeFun.subscript` alias.")
+    end
+
+    patched = join(lines)
+    call_pattern = r"(?<![\w\.])subscript\("
+    call_matches = collect(eachmatch(call_pattern, patched))
+    call_count = length(call_matches)
+    if call_count > 0
+        patched = replace(patched, call_pattern => "_subscript(")
+        plural = call_count == 1 ? "" : "s"
+        push!(summaries, "Rewrote $(call_count) call$plural `subscript(` -> `_subscript(`.")
+        changed = true
+    end
+
+    changed || return false
 
     backup_path = ext_path * ".bak"
     if !isfile(backup_path)
@@ -136,7 +201,12 @@ function patch_dsviz_subscript!(ext_path::AbstractString)
     end
 
     open(ext_path, "w") do io
-        write(io, join(patched))
+        write(io, patched)
+    end
+
+    println("Applied DynamicalSystemsVisualizations subscript patch:")
+    for entry in summaries
+        println("  - ", entry)
     end
 
     return true
