@@ -43,6 +43,21 @@ function safe_import(modsym::Symbol; pkgname::AbstractString=String(modsym))
     end
 end
 
+"""
+Attempt to load an optional dependency. Returns `true` if successful and
+`false` otherwise while keeping the script running.
+"""
+function try_import(modsym::Symbol; pkgname::AbstractString=String(modsym))
+    try
+        @eval import $(modsym)
+        return true
+    catch err
+        @info "Optional dependency $pkgname unavailable – falling back";
+        @debug "Failed to load optional dependency" exception=(err, catch_backtrace())
+        return false
+    end
+end
+
 using LinearAlgebra
 using Statistics
 using DifferentialEquations
@@ -105,6 +120,15 @@ using .BeliefAnalysisCore.Stats: estimate_Vstar, estimate_g, critical_kappa
 safe_import(:YAML; pkgname="YAML")
 safe_import(:CairoMakie; pkgname="CairoMakie")
 safe_import(:ColorSchemes; pkgname="ColorSchemes")
+
+# Optional Attractors.jl integration for basin computations
+const ATTRACTORS_AVAILABLE = try_import(:Attractors; pkgname="Attractors") &&
+                             try_import(:DynamicalSystems; pkgname="DynamicalSystems")
+if ATTRACTORS_AVAILABLE
+    @info "Attractors.jl detected – enabling advanced basin computation"
+else
+    @info "Proceeding with internal basin computation (Attractors.jl not active)"
+end
 
 # Load bifurcation modules
 include(joinpath(@__DIR__, "..", "src", "bifurcation", "model_interface.jl"))
@@ -522,11 +546,13 @@ end
 """
 Compute a supersampled basin grid and convergence times.
 Supersampling (ss≥1) anti-aliases boundaries (majority vote on labels).
-Returns (xs, ys, labels::Matrix{Int8}, times::Matrix{Float32})
+Returns (xs, ys, labels::Matrix{Int8}, times::Matrix{Float32}).
+This is the built-in fallback implementation used when Attractors.jl is
+unavailable or fails.
 """
-function compute_basin_grid(κ::Real, p_base; xmin=-3.0, xmax=3.0, ymin=-3.0, ymax=3.0,
-                            res::Int=250, ss::Int=2, tmax::Float64=300.0,
-                            dt::Float64=0.05, ε::Float64=1e-3)
+function compute_basin_grid_fallback(κ::Real, p_base; xmin=-3.0, xmax=3.0, ymin=-3.0, ymax=3.0,
+                                     res::Int=250, ss::Int=2, tmax::Float64=300.0,
+                                     dt::Float64=0.05, ε::Float64=1e-3)
     p   = ModelInterface.kappa_set(p_base, κ)
     xs  = range(xmin, xmax; length=res)
     ys  = range(ymin, ymax; length=res)
@@ -553,6 +579,159 @@ function compute_basin_grid(κ::Real, p_base; xmin=-3.0, xmax=3.0, ymin=-3.0, ym
         end
     end
     return xs, ys, labels, times
+end
+
+"""
+Attempt to compute the basin grid using Attractors.jl. Falls back to the
+internal implementation if Attractors.jl is not available or raises an
+exception.
+"""
+function compute_basin_grid_attractors(κ::Real, p_base; xmin=-3.0, xmax=3.0,
+                                       ymin=-3.0, ymax=3.0, res::Int=250,
+                                       ss::Int=2, tmax::Float64=300.0,
+                                       dt::Float64=0.05, ε::Float64=1e-3)
+    try
+        p   = ModelInterface.kappa_set(p_base, κ)
+        flow! = (du, u, p, t) -> (du .= ModelInterface.f(u, p))
+        ds = DynamicalSystems.ContinuousDynamicalSystem(flow!, zeros(2), p)
+
+        ss_eff = max(ss, 1)
+        res_eff = max(res * ss_eff, 2)
+        xs_fine = range(xmin, xmax; length=res_eff)
+        ys_fine = range(ymin, ymax; length=res_eff)
+
+        grid = let constructed = false, g = nothing
+            if isdefined(Attractors, :RectangleGrid)
+                try
+                    g = Attractors.RectangleGrid(xs_fine, ys_fine)
+                    constructed = true
+                catch err
+                    @debug "RectangleGrid(xs, ys) failed" exception=(err, catch_backtrace())
+                end
+                if !constructed
+                    try
+                        g = Attractors.RectangleGrid((xmin, xmax), (ymin, ymax); dims=(res_eff, res_eff))
+                        constructed = true
+                    catch err
+                        @debug "RectangleGrid span constructor failed" exception=(err, catch_backtrace())
+                    end
+                end
+            end
+            if !constructed && isdefined(Attractors, :Grid)
+                try
+                    g = Attractors.Grid((xs_fine, ys_fine))
+                    constructed = true
+                catch err
+                    @debug "Grid constructor failed" exception=(err, catch_backtrace())
+                end
+            end
+            if !constructed
+                @warn "Failed to construct Attractors grid; falling back"
+                return compute_basin_grid_fallback(κ, p_base;
+                                                   xmin=xmin, xmax=xmax,
+                                                   ymin=ymin, ymax=ymax,
+                                                   res=res, ss=ss,
+                                                   tmax=tmax, dt=dt, ε=ε)
+            end
+            g
+        end
+
+        method = nothing
+        if isdefined(Attractors, :AttractorsViaIntegrators)
+            base_kwargs = (; tfinal=tmax, Δt=dt, abstol=1e-9, reltol=1e-9)
+            stop_kwargs = if isdefined(Attractors, :norm_stop)
+                (; stopping_condition=Attractors.norm_stop(ε))
+            else
+                (;)
+            end
+            method = Attractors.AttractorsViaIntegrators(; merge(base_kwargs, stop_kwargs)...)
+        end
+
+        kwargs = (; show_progress=false)
+        if method !== nothing
+            kwargs = merge(kwargs, (; method))
+        end
+
+        basin_result = Attractors.basins_of_attraction(ds, grid; kwargs...)
+
+        basins_raw = if hasproperty(basin_result, :basins)
+            getproperty(basin_result, :basins)
+        elseif basin_result isa Tuple
+            basin_result[1]
+        else
+            basin_result
+        end
+
+        times_raw = if hasproperty(basin_result, :times)
+            getproperty(basin_result, :times)
+        elseif hasproperty(basin_result, :mean_convergence_time)
+            getproperty(basin_result, :mean_convergence_time)
+        else
+            nothing
+        end
+
+        basins_mat = Array{Int8}(undef, res_eff, res_eff)
+        for j in 1:res_eff, i in 1:res_eff
+            basins_mat[i, j] = Int8(basins_raw[i, j])
+        end
+
+        times_mat = if times_raw === nothing
+            nothing
+        else
+            Float32.(times_raw)
+        end
+
+        if ss_eff > 1
+            labels = Matrix{Int8}(undef, res, res)
+            times = Matrix{Float32}(undef, res, res)
+            for i in 1:res, j in 1:res
+                i1 = (i - 1) * ss_eff + 1
+                i2 = i1 + ss_eff - 1
+                j1 = (j - 1) * ss_eff + 1
+                j2 = j1 + ss_eff - 1
+                block = @view basins_mat[i1:i2, j1:j2]
+                labels[i, j] = StatsBase.mode(vec(block))
+                if times_raw === nothing
+                    times[i, j] = Float32(NaN)
+                else
+                    block_t = @view times_mat[i1:i2, j1:j2]
+                    times[i, j] = Float32(mean(block_t))
+                end
+            end
+        else
+            labels = basins_mat
+            times = times_mat === nothing ? fill(Float32(NaN), size(labels)) : times_mat
+        end
+
+        xs = range(xmin, xmax; length=res)
+        ys = range(ymin, ymax; length=res)
+
+        if any(t -> !isfinite(t), times)
+            @info "Attractors.jl did not provide convergence times – recomputing with fallback"
+            _, _, _, times = compute_basin_grid_fallback(κ, p_base;
+                                                         xmin=xmin, xmax=xmax,
+                                                         ymin=ymin, ymax=ymax,
+                                                         res=res, ss=ss,
+                                                         tmax=tmax, dt=dt, ε=ε)
+        end
+
+        return xs, ys, labels, times
+    catch err
+        @warn "Attractors.jl basin computation failed; using fallback" exception=(err, catch_backtrace())
+        return compute_basin_grid_fallback(κ, p_base;
+                                           xmin=xmin, xmax=xmax,
+                                           ymin=ymin, ymax=ymax,
+                                           res=res, ss=ss,
+                                           tmax=tmax, dt=dt, ε=ε)
+    end
+end
+
+function compute_basin_grid(κ::Real, p_base; kwargs...)
+    if ATTRACTORS_AVAILABLE
+        return compute_basin_grid_attractors(κ, p_base; kwargs...)
+    else
+        return compute_basin_grid_fallback(κ, p_base; kwargs...)
+    end
 end
 
 
@@ -588,7 +767,7 @@ function overlay_vectorfield!(ax, f::Function, p;
     # Point2f / Vec2f are available via CairoMakie / Makie
     positions  = Point2f.(X, Y)
     directions = Vec2f.(U, V)
-    arrows2d!(ax, positions, directions; strokewidth=0.8, tipwidth=6, tiplength=10, color=:gray55)
+    arrows2d!(ax, positions, directions; linewidth=0.8, tipwidth=6, tiplength=10, color=:gray55)
     return nothing
 end
 
@@ -896,9 +1075,9 @@ function plot_basins(κ_values, p_base; resolution::Int=300,
 
         # Left: categorical basins
         heatmap!(axL, xs, ys, labT; colorrange=(-1.0, 1.0), colormap=Reverse(:RdBu))
-        # Draw line contours (Float64 grid ⇒ poly recipe ⇒ use strokewidth)
+        # Draw line contours (Float64 grid ⇒ poly recipe ⇒ use linewidth)
         contour!(axL, xs, ys, labTf; levels=[-0.5, 0.0, 0.5],
-                color=:black, strokewidth=1.4)
+                color=:black, linewidth=1.4)
 
         # light vector field overlay (from your plotting util)
         # light vector field overlay (self-contained)
@@ -926,9 +1105,9 @@ function plot_basins(κ_values, p_base; resolution::Int=300,
                    xlabel="u₁", ylabel="u₂", aspect=DataAspect(),
                    xgridvisible=false, ygridvisible=false)
         hm = heatmap!(axR, xs, ys, tlogT; colormap=:viridis)
-        # reuse separatrix to show slow regions near boundaries (poly recipe ⇒ strokewidth)
+        # reuse separatrix to show slow regions near boundaries (poly recipe ⇒ linewidth)
         contour!(axR, xs, ys, labTf; levels=[-0.5, 0.0, 0.5],
-                 color=:black, strokewidth=1.2)
+                 color=:black, linewidth=1.2)
         Colorbar(fig[row, 3], hm)
 
         # clean limits
