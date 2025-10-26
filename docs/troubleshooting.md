@@ -114,3 +114,53 @@ Switching to `arrows2d!` (as already done for the basin overlays) silences the
 warnings and gives finer control over tip geometry. This adjustment is planned
 for the plotting utilities; in the meantime the warnings are harmless.
 
+## 5. `invalid assignment to constant DynamicalSystemsVisualizations.subscript`
+
+**Symptoms**
+
+Adding `Attractors.jl` and `DynamicalSystems.jl` to the project and running
+`Pkg.precompile()` (or starting the YAML analysis script) fails with:
+
+```text
+ERROR: LoadError: invalid assignment to constant DynamicalSystemsVisualizations.subscript
+```
+
+The stack trace points at
+`~/.julia/packages/DynamicalSystems/*/ext/DynamicalSystemsVisualizations.jl`.
+
+**Cause**
+
+`DynamicalSystems.jl` bundles the `DynamicalSystemsVisualizations` extension so
+that attractor basins can be rendered with Makie. Versions of the extension
+prior to `0.6` attempt to reassign the global `subscript` lookup table during
+initialisation. Julia 1.12 tightened constant redefinition rules, so the
+assignment that previously worked on Julia 1.10/1.11 now throws the above load
+error when the package precompiles.【F:scripts/analyze_from_yaml.jl†L60-L77】
+
+**Fixes**
+
+1. Update `DynamicalSystems.jl` (and therefore the extension) to a release that
+   supports Julia 1.12:
+
+   ```julia
+   julia --project=. -e 'using Pkg; Pkg.update(); Pkg.add(PackageSpec(name="DynamicalSystems", version="3.0"))'
+   ```
+
+   Any newer release that depends on `DynamicalSystemsVisualizations ≥ 0.6`
+   avoids the reassignment. `Pkg.update()` ensures Makie and the visualisation
+   stack match the extension requirements.
+
+2. As a temporary workaround while staying on an older package version, edit
+   `~/.julia/packages/DynamicalSystems/*/ext/DynamicalSystemsVisualizations.jl`
+   and change the offending line to declare the lookup table as a constant:
+
+   ```julia
+   const subscript = Dict("0" => '₀', "1" => '₁', …)
+   ```
+
+   Precompile again afterwards. This mirrors the fix applied upstream until you
+   can update the package versions.
+
+After either fix, rerun `julia --project=. scripts/analyze_from_yaml.jl …` and
+the optional Attractors-based basin routines will load successfully.
+

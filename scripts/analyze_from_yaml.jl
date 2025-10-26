@@ -55,7 +55,8 @@ function try_import(modsym::Symbol; pkgname::AbstractString=String(modsym),
         return true
     catch err
         @info "Optional dependency $pkgname unavailable – falling back";
-        @debug "Failed to load optional dependency" exception=(err, catch_backtrace())
+        bt = catch_backtrace()
+        @debug "Failed to load optional dependency" exception=(err, bt)
         pkgpath = Base.find_package(pkgname)
         if pkgpath === nothing
             suggestion = isnothing(install_hint) ?
@@ -66,6 +67,12 @@ function try_import(modsym::Symbol; pkgname::AbstractString=String(modsym),
         end
         if min_julia !== nothing && VERSION < min_julia
             @info "  → Requires Julia $(min_julia) or newer (current $(VERSION))"
+        end
+        msg = sprint(showerror, err)
+        if occursin("DynamicalSystemsVisualizations.subscript", msg)
+            @info "  → DynamicalSystemsVisualizations < 0.6 is incompatible with Julia $(VERSION)"
+            @info "    Run: julia --project=. -e 'using Pkg; Pkg.update(); Pkg.add(PackageSpec(name=\"DynamicalSystems\", version=\"3.0\"))'"
+            @info "    or patch ~/.julia/packages/DynamicalSystems/*/ext/DynamicalSystemsVisualizations.jl to declare `const subscript = …`"
         end
         return false
     end
