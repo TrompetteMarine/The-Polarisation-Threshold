@@ -1102,7 +1102,7 @@ function plot_basins(κ_values, p_base; resolution::Int=300,
         heatmap!(axL, xs, ys, labT; colorrange=(-1.0, 1.0), colormap=Reverse(:RdBu))
         # Draw line contours (poly recipe ⇒ strokewidth)
         contour!(axL, xs, ys, labTf; levels=[-0.5, 0.0, 0.5],
-                color=:black, strokewidth=1.4)
+                color=:black, linewidth=1.4)
 
         # light vector field overlay (from your plotting util)
         # light vector field overlay (self-contained)
@@ -1130,9 +1130,9 @@ function plot_basins(κ_values, p_base; resolution::Int=300,
                    xlabel="u₁", ylabel="u₂", aspect=DataAspect(),
                    xgridvisible=false, ygridvisible=false)
         hm = heatmap!(axR, xs, ys, tlogT; colormap=:viridis)
-        # reuse separatrix to show slow regions near boundaries (poly recipe ⇒ strokewidth)
+        # reuse separatrix to show slow regions near boundaries (poly recipe ⇒ linewidth)
         contour!(axR, xs, ys, labTf; levels=[-0.5, 0.0, 0.5],
-                 color=:black, strokewidth=1.2)
+                 color=:black, linewidth=1.2)
         Colorbar(fig[row, 3], hm)
 
         # clean limits
