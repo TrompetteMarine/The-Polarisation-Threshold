@@ -43,17 +43,35 @@ function safe_import(modsym::Symbol; pkgname::AbstractString=String(modsym))
     end
 end
 
+const DSVIZ_PATCH_APPLIED = Ref(false)
+
 """
 Attempt to load an optional dependency. Returns `true` if successful and
 `false` otherwise while keeping the script running.
 """
 function try_import(modsym::Symbol; pkgname::AbstractString=String(modsym),
                     install_hint::Union{Nothing,AbstractString}=nothing,
-                    min_julia::Union{Nothing,VersionNumber}=nothing)
+                    min_julia::Union{Nothing,VersionNumber}=nothing,
+                    allow_dsviz_patch::Bool=true)
     try
         @eval import $(modsym)
         return true
     catch err
+        msg = sprint(showerror, err)
+        if allow_dsviz_patch && occursin("DynamicalSystemsVisualizations.subscript", msg) && !DSVIZ_PATCH_APPLIED[]
+            ext_path = locate_dsviz_extension()
+            if ext_path !== nothing && patch_dsviz_subscript!(ext_path)
+                DSVIZ_PATCH_APPLIED[] = true
+                @info "  → Patched DynamicalSystemsVisualizations.subscript to use `const`"
+                if isdefined(Base, :retry_load_extensions)
+                    Base.retry_load_extensions()
+                end
+                return try_import(modsym; pkgname=pkgname, install_hint=install_hint,
+                                  min_julia=min_julia, allow_dsviz_patch=false)
+            else
+                @info "  → DynamicalSystemsVisualizations patch unavailable (path: $(ext_path))"
+            end
+        end
         @info "Optional dependency $pkgname unavailable – falling back";
         bt = catch_backtrace()
         @debug "Failed to load optional dependency" exception=(err, bt)
@@ -68,15 +86,65 @@ function try_import(modsym::Symbol; pkgname::AbstractString=String(modsym),
         if min_julia !== nothing && VERSION < min_julia
             @info "  → Requires Julia $(min_julia) or newer (current $(VERSION))"
         end
-        msg = sprint(showerror, err)
-        if occursin("DynamicalSystemsVisualizations.subscript", msg)
-            @info "  → DynamicalSystemsVisualizations < 0.6 is incompatible with Julia $(VERSION)"
-            @info "    Run: julia --project=. -e 'using Pkg; Pkg.update(); Pkg.add(PackageSpec(name=\"DynamicalSystems\", version=\"3.0\"))'"
-            @info "    or patch ~/.julia/packages/DynamicalSystems/*/ext/DynamicalSystemsVisualizations.jl to declare `const subscript = …`"
-        end
         return false
     end
 end
+
+"""
+Locate the DynamicalSystemsVisualizations extension that ships with DynamicalSystems.
+Returns `nothing` if the package is not installed or if the extension path is missing.
+"""
+function locate_dsviz_extension()
+    pkgpath = Base.find_package("DynamicalSystems")
+    pkgpath === nothing && return nothing
+
+    pkgdir = normpath(joinpath(dirname(pkgpath), ".."))
+    ext_path = normpath(joinpath(pkgdir, "ext", "DynamicalSystemsVisualizations.jl"))
+    return isfile(ext_path) ? ext_path : nothing
+end
+
+"""
+Patch the DynamicalSystemsVisualizations extension so the `subscript` attribute is declared as a
+`const`, preventing Julia ≥ 1.10 from raising an "invalid assignment to constant" error during
+precompilation. Returns `true` when a patch is applied, `false` otherwise.
+"""
+function patch_dsviz_subscript!(ext_path::AbstractString)
+    contents = read(ext_path, String)
+    occursin("const subscript", contents) && return false
+
+    pattern = r"(?m)^(\s*)subscript\s*="
+    m = findfirst(pattern, contents)
+    m === nothing && return false
+
+    first_idx = firstindex(contents)
+    last_idx = lastindex(contents)
+    prefix = m.first > first_idx ? contents[first_idx:m.first-1] : ""
+    suffix = m.last < last_idx ? contents[m.last+1:last_idx] : ""
+    match_obj = match(pattern, contents[m.first:m.last])
+    indent = match_obj === nothing ? "" : match_obj.captures[1]
+
+    patched = String[]
+    push!(patched, prefix)
+    push!(patched, indent * "const subscript =")
+    push!(patched, suffix)
+
+    backup_path = ext_path * ".bak"
+    if !isfile(backup_path)
+        open(backup_path, "w") do io
+            write(io, contents)
+        end
+    end
+
+    open(ext_path, "w") do io
+        write(io, join(patched))
+    end
+
+    return true
+end
+
+attempt_import_dynamicalsystems() =
+    try_import(:DynamicalSystems; pkgname="DynamicalSystems",
+               install_hint="julia --project=. -e 'using Pkg; Pkg.add(\"DynamicalSystems\")'")
 
 using LinearAlgebra
 using Statistics
@@ -156,8 +224,7 @@ const DYNAMICALSYSTEMS_MODULE = Ref{Union{Module,Nothing}}(nothing)
 const DYNAMICALSYSTEMS_BACKEND = Ref{Symbol}(:none)
 
 function load_dynamicalsystems_backend()
-    if try_import(:DynamicalSystems; pkgname="DynamicalSystems",
-                  install_hint="julia --project=. -e 'using Pkg; Pkg.add(\"DynamicalSystems\")'")
+    if attempt_import_dynamicalsystems()
         DYNAMICALSYSTEMS_MODULE[] = getfield(Main, :DynamicalSystems)
         DYNAMICALSYSTEMS_BACKEND[] = :dynamicalsystems
         return true

@@ -142,7 +142,13 @@ error when the package precompiles.【F:scripts/analyze_from_yaml.jl†L60-L77�
 
 **Fixes**
 
-1. Update `DynamicalSystems.jl` (and therefore the extension) to a release that
+1. Re-run the YAML analysis script. When it encounters the `subscript`
+   redefinition it automatically patches the installed
+   `DynamicalSystemsVisualizations.jl` extension by rewriting the offending
+   assignment as a constant (creating a `.bak` backup the first time). The
+   script then retries the load transparently before continuing.【F:scripts/analyze_from_yaml.jl†L60-L139】
+
+2. Update `DynamicalSystems.jl` (and therefore the extension) to a release that
    supports Julia 1.12:
 
    ```julia
@@ -153,7 +159,7 @@ error when the package precompiles.【F:scripts/analyze_from_yaml.jl†L60-L77�
    avoids the reassignment. `Pkg.update()` ensures Makie and the visualisation
    stack match the extension requirements.
 
-2. As a temporary workaround while staying on an older package version, edit
+3. If you prefer a manual workaround, edit
    `~/.julia/packages/DynamicalSystems/*/ext/DynamicalSystemsVisualizations.jl`
    and change the offending line to declare the lookup table as a constant:
 
@@ -164,8 +170,8 @@ error when the package precompiles.【F:scripts/analyze_from_yaml.jl†L60-L77�
    Precompile again afterwards. This mirrors the fix applied upstream until you
    can update the package versions.
 
-After either fix, rerun `julia --project=. scripts/analyze_from_yaml.jl …`. The
-script will automatically prefer the full `DynamicalSystems.jl` module when it
-loads cleanly and otherwise fall back to the patched
-`DynamicalSystemsBase.jl` backend so Attractors support remains available.【F:scripts/analyze_from_yaml.jl†L90-L139】
+After any fix, rerun `julia --project=. scripts/analyze_from_yaml.jl …`. The
+script will prefer the full `DynamicalSystems.jl` module when it loads cleanly
+and otherwise fall back to the patched `DynamicalSystemsBase.jl` backend so
+Attractors support remains available.【F:scripts/analyze_from_yaml.jl†L225-L251】
 
