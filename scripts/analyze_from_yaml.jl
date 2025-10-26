@@ -152,12 +152,35 @@ else
 end
 
 # Optional Attractors.jl integration for basin computations
+const DYNAMICALSYSTEMS_MODULE = Ref{Union{Module,Nothing}}(nothing)
+const DYNAMICALSYSTEMS_BACKEND = Ref{Symbol}(:none)
+
+function load_dynamicalsystems_backend()
+    if try_import(:DynamicalSystems; pkgname="DynamicalSystems",
+                  install_hint="julia --project=. -e 'using Pkg; Pkg.add(\"DynamicalSystems\")'")
+        DYNAMICALSYSTEMS_MODULE[] = getfield(Main, :DynamicalSystems)
+        DYNAMICALSYSTEMS_BACKEND[] = :dynamicalsystems
+        return true
+    end
+
+    if try_import(:DynamicalSystemsBase; pkgname="DynamicalSystemsBase",
+                  install_hint="julia --project=. -e 'using Pkg; Pkg.add(\"DynamicalSystemsBase\")'")
+        DYNAMICALSYSTEMS_MODULE[] = getfield(Main, :DynamicalSystemsBase)
+        DYNAMICALSYSTEMS_BACKEND[] = :dynamicalsystemsbase
+        @info "Using DynamicalSystemsBase fallback – visualization extensions skipped"
+        return true
+    end
+
+    return false
+end
+
 const ATTRACTORS_AVAILABLE = try_import(:Attractors; pkgname="Attractors",
-                                        install_hint="julia --project=. -e 'using Pkg; Pkg.add(\"Attractors\"); Pkg.add(\"DynamicalSystems\")'") &&
-                             try_import(:DynamicalSystems; pkgname="DynamicalSystems",
-                                        install_hint="julia --project=. -e 'using Pkg; Pkg.add(\"DynamicalSystems\")'")
+                                        install_hint="julia --project=. -e 'using Pkg; Pkg.add(\"Attractors\"); Pkg.add(\"DynamicalSystemsBase\")'") &&
+                             load_dynamicalsystems_backend()
+
 if ATTRACTORS_AVAILABLE
-    @info "Attractors.jl detected – enabling advanced basin computation"
+    backend = DYNAMICALSYSTEMS_BACKEND[] === :dynamicalsystems ? "DynamicalSystems.jl" : "DynamicalSystemsBase.jl"
+    @info "Attractors.jl detected – enabling advanced basin computation via $backend"
 else
     @info "Proceeding with internal basin computation (Attractors.jl not active)"
 end
@@ -623,9 +646,19 @@ function compute_basin_grid_attractors(κ::Real, p_base; xmin=-3.0, xmax=3.0,
                                        ss::Int=2, tmax::Float64=300.0,
                                        dt::Float64=0.05, ε::Float64=1e-3)
     try
+        ds_mod = DYNAMICALSYSTEMS_MODULE[]
+        if ds_mod === nothing
+            @warn "DynamicalSystems backend not available despite Attractors flag – falling back"
+            return compute_basin_grid_fallback(κ, p_base;
+                                               xmin=xmin, xmax=xmax,
+                                               ymin=ymin, ymax=ymax,
+                                               res=res, ss=ss,
+                                               tmax=tmax, dt=dt, ε=ε)
+        end
+
         p   = ModelInterface.kappa_set(p_base, κ)
         flow! = (du, u, p, t) -> (du .= ModelInterface.f(u, p))
-        ds = DynamicalSystems.ContinuousDynamicalSystem(flow!, zeros(2), p)
+        ds = ds_mod.ContinuousDynamicalSystem(flow!, zeros(2), p)
 
         ss_eff = max(ss, 1)
         res_eff = max(res * ss_eff, 2)

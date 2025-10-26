@@ -52,26 +52,29 @@ The script prints:
 
 ```text
 Optional dependency Attractors unavailable – falling back
-  → Install with: julia --project=. -e 'using Pkg; Pkg.add("Attractors"); Pkg.add("DynamicalSystems")'
+  → Install with: julia --project=. -e 'using Pkg; Pkg.add("Attractors"); Pkg.add("DynamicalSystemsBase")'
 ```
 
 **Cause**
 
-`Attractors.jl` and its companion `DynamicalSystems.jl` are not listed in the
+`Attractors.jl` and a compatible dynamical systems backend are not listed in the
 project’s dependencies, so they are only loaded when the user installs them
 explicitly. The optional loader reports the absence and the basin computation
-reverts to the self-contained integrator.【F:scripts/analyze_from_yaml.jl†L81-L94】
+reverts to the self-contained integrator.【F:scripts/analyze_from_yaml.jl†L90-L139】
 
 **Fix**
 
 Install the optional packages inside the project environment:
 
 ```julia
-julia --project=. -e 'using Pkg; Pkg.add("Attractors"); Pkg.add("DynamicalSystems")'
+julia --project=. -e 'using Pkg; Pkg.add("Attractors"); Pkg.add("DynamicalSystemsBase")'
 ```
 
-Re-running `scripts/analyze_from_yaml.jl` will now make use of the
-Attractors-based basin sampler.
+If you prefer the full `DynamicalSystems.jl` stack for additional tooling, it
+will be used automatically when present; otherwise the script falls back to the
+lightweight `DynamicalSystemsBase.jl` backend to avoid known precompilation
+issues on Julia 1.12.【F:scripts/analyze_from_yaml.jl†L90-L139】 Re-running the
+analysis will now make use of the Attractors-based basin sampler.
 
 ## 3. `Invalid attribute linewidth` when plotting basins
 
@@ -93,7 +96,7 @@ failure you observed.
 **Fix**
 
 Update to the current script version, which now renders the contours using the
-`strokewidth` attribute that Makie expects for `Poly` plots.【F:scripts/analyze_from_yaml.jl†L1099-L1136】
+`strokewidth` attribute that Makie expects for `Poly` plots.【F:scripts/analyze_from_yaml.jl†L1122-L1175】
 If you maintain local patches, make sure any custom contour or arrow overlays
 also use `strokewidth` instead of `linewidth`.
 
@@ -161,6 +164,8 @@ error when the package precompiles.【F:scripts/analyze_from_yaml.jl†L60-L77�
    Precompile again afterwards. This mirrors the fix applied upstream until you
    can update the package versions.
 
-After either fix, rerun `julia --project=. scripts/analyze_from_yaml.jl …` and
-the optional Attractors-based basin routines will load successfully.
+After either fix, rerun `julia --project=. scripts/analyze_from_yaml.jl …`. The
+script will automatically prefer the full `DynamicalSystems.jl` module when it
+loads cleanly and otherwise fall back to the patched
+`DynamicalSystemsBase.jl` backend so Attractors support remains available.【F:scripts/analyze_from_yaml.jl†L90-L139】
 
