@@ -18,18 +18,23 @@ using Pkg
 
 const PROJECT_ROOT = normpath(joinpath(@__DIR__, ".."))
 const OUTPUT_ROOT  = normpath(joinpath(PROJECT_ROOT, "outputs"))
+const DISABLE_DYNAMICALSYSTEMS =
+    get(ENV, "DISABLE_DYNAMICALSYSTEMS", "0") in ("1","true","yes","on")
+
 
 Pkg.activate(PROJECT_ROOT)
 
 function ensure_project_dependencies()
     try
-        Pkg.instantiate()
+        Pkg.instantiate(; allow_autoprecomp=false)
     catch err
         bt = catch_backtrace()
         @error "Failed to instantiate project dependencies" exception=(err, bt)
         exit(1)
     end
 end
+
+
 
 ensure_project_dependencies()
 
@@ -294,22 +299,28 @@ const DYNAMICALSYSTEMS_MODULE = Ref{Union{Module,Nothing}}(nothing)
 const DYNAMICALSYSTEMS_BACKEND = Ref{Symbol}(:none)
 
 function load_dynamicalsystems_backend()
-    if attempt_import_dynamicalsystems()
-        DYNAMICALSYSTEMS_MODULE[] = getfield(Main, :DynamicalSystems)
-        DYNAMICALSYSTEMS_BACKEND[] = :dynamicalsystems
+    # Prefer the base API (never loads the Makie extension)
+    if try_import(:DynamicalSystemsBase; pkgname="DynamicalSystemsBase",
+                  install_hint="julia --project=. -e 'using Pkg; Pkg.add(\"DynamicalSystemsBase\")'")
+        DYNAMICALSYSTEMS_MODULE[]  = getfield(Main, :DynamicalSystemsBase)
+        DYNAMICALSYSTEMS_BACKEND[] = :dynamicalsystemsbase
+        @info "Using DynamicalSystemsBase backend – visualization extensions skipped"
         return true
     end
 
-    if try_import(:DynamicalSystemsBase; pkgname="DynamicalSystemsBase",
-                  install_hint="julia --project=. -e 'using Pkg; Pkg.add(\"DynamicalSystemsBase\")'")
-        DYNAMICALSYSTEMS_MODULE[] = getfield(Main, :DynamicalSystemsBase)
-        DYNAMICALSYSTEMS_BACKEND[] = :dynamicalsystemsbase
-        @info "Using DynamicalSystemsBase fallback – visualization extensions skipped"
+    # Only consider the full package if explicitly allowed
+    if !DISABLE_DYNAMICALSYSTEMS &&
+       try_import(:DynamicalSystems; pkgname="DynamicalSystems",
+                  install_hint="julia --project=. -e 'using Pkg; Pkg.add(\"DynamicalSystems\")'",
+                  allow_dsviz_patch=true)
+        DYNAMICALSYSTEMS_MODULE[]  = getfield(Main, :DynamicalSystems)
+        DYNAMICALSYSTEMS_BACKEND[] = :dynamicalsystems
         return true
     end
 
     return false
 end
+
 
 const ATTRACTORS_AVAILABLE = try_import(:Attractors; pkgname="Attractors",
                                         install_hint="julia --project=. -e 'using Pkg; Pkg.add(\"Attractors\"); Pkg.add(\"DynamicalSystemsBase\")'") &&
