@@ -25,9 +25,7 @@ This repository accompanies the manuscript on the polarisation threshold in Orns
 
 ## How to cite
 
-> Author(s), *Title of the manuscript*, Year. Replication materials available at `https://github.com/TrompetteMarine/The-Polarisation-Threshold`.
-
-Update the citation with the final bibliographic metadata once the article is published. If you build on this codebase, please cite both the manuscript and this replication package.
+> Bontemps Gabriel, *The Polarisation Threshold*, 2025. Replication materials available at `https://github.com/TrompetteMarine/The-Polarisation-Threshold`.
 
 ---
 
