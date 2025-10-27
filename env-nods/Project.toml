@@ -1,0 +1,11 @@
+[deps]
+Attractors = "f3fd9213-ca85-4dba-9dfd-7fc91308fec7"
+CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
+CairoMakie = "13f3f980-e62b-5c42-98c6-ff1f3baf88f0"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+DifferentialEquations = "0c46a032-eb83-5123-abaf-570d42b7fbaa"
+DynamicalSystemsBase = "6e36e845-645a-534a-86f2-f5d4aa5a06b4"
+FFTW = "7a1cc6ca-52ef-59f5-83cd-3a7055c09341"
+Graphs = "86223c79-3864-5bf0-83f7-82e725a168b6"
+StatsBase = "2913bbd2-ae8a-5f71-8c99-4fb6c76f3a91"
+YAML = "ddb6d928-2868-570f-bddf-ab3f9cf99eb6"
