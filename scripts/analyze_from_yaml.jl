@@ -1519,7 +1519,7 @@ end
 """
 Plot 6: Parameter scan
 """
-function plot_parameter_scan(κ_range, p_base; n_points=150)
+function plot_parameter_scan(κ_range, p_base; n_points=400)
     @info "  Computing parameter scan..."
     
     κ_vals = collect(range(κ_range[1], κ_range[2], length=n_points))
@@ -1533,7 +1533,7 @@ function plot_parameter_scan(κ_range, p_base; n_points=150)
     polarized_stable_mask = polarized_mask .& (diag.polarized_max .< 0)
     polarized_unstable_mask = polarized_mask .& (.!polarized_stable_mask)
 
-    fig = Figure(size=(1200, 720))
+    fig = Figure(size=(1600, 780))
 
     ax = Axis(fig[1, 1];
              xlabel="Coupling κ", ylabel="Polarization |u₁ - u₂|/2",
@@ -1574,7 +1574,90 @@ function plot_parameter_scan(κ_range, p_base; n_points=150)
 end
 
 """
-Plot 7: Lyapunov spectrum
+Plot 7: Calibrated validation around κ*
+"""
+function plot_calibrated_validation(κ_range, p_base, meta)
+    κ_vals = collect(κ_range)
+    isempty(κ_vals) && error("κ_range must contain at least one point")
+
+    diag = equilibrium_diagnostics(κ_vals, p_base)
+
+    κ_star = meta.κ_star
+    Vstar = meta.Vstar
+
+    prefactor = p_base.g * p_base.σ^2 / (2 * p_base.λ)
+    theory_variance = prefactor ./ κ_vals
+
+    theory_amp = if isfinite(κ_star) && κ_star > 0
+        sqrt.(clamp.(κ_vals .- κ_star, 0, Inf) ./ κ_star)
+    else
+        zeros(length(κ_vals))
+    end
+
+    consensus_vals = diag.consensus_max
+    polarized_vals = diag.polarized_max
+    polarized_mask = diag.polarized_exists .& (.!isnan.(polarized_vals))
+    polarized_curve = fill(NaN, length(polarized_vals))
+    polarized_curve[polarized_mask] .= polarized_vals[polarized_mask]
+
+    fig = Figure(size=(1500, 1000))
+
+    ax1 = Axis(fig[1, 1];
+               xlabel="Coupling κ",
+               ylabel="Stationary variance V",
+               title="κ* calibration via V*")
+
+    valid_var = .!(isinf.(theory_variance) .| isnan.(theory_variance))
+    if any(valid_var)
+        lines!(ax1, κ_vals[valid_var], theory_variance[valid_var];
+               color=:steelblue, linewidth=3, label="Theory V(κ)")
+    end
+
+    if isfinite(Vstar) && isfinite(κ_star)
+        hlines!(ax1, [Vstar]; color=:gray, linestyle=:dash, linewidth=2)
+        vlines!(ax1, [κ_star]; color=:seagreen, linestyle=:dash, linewidth=2)
+        scatter!(ax1, [κ_star], [Vstar]; color=:crimson, markersize=15, label="Calibrated (κ*, V*)")
+    end
+
+    axislegend(ax1, position=:rt)
+
+    ax2 = Axis(fig[2, 1];
+               xlabel="Coupling κ",
+               ylabel="Polarization amplitude",
+               title="√(κ − κ*) scaling")
+
+    lines!(ax2, κ_vals, diag.polarized_amp; color=:firebrick, linewidth=3, label="Deterministic branch")
+    if any(x -> !iszero(x), theory_amp)
+        lines!(ax2, κ_vals, theory_amp; color=:black, linewidth=2, linestyle=:dash,
+               label="Theory √((κ−κ*)/κ*)")
+    end
+
+    if isfinite(κ_star)
+        vlines!(ax2, [κ_star]; color=:seagreen, linestyle=:dash, linewidth=2)
+    end
+
+    axislegend(ax2, position=:lt)
+
+    ax3 = Axis(fig[3, 1];
+               xlabel="Coupling κ",
+               ylabel="max Re(λ)",
+               title="Supercritical branch stability")
+
+    lines!(ax3, κ_vals, consensus_vals; color=:navy, linewidth=2.5, linestyle=:dot, label="Consensus")
+    lines!(ax3, κ_vals, polarized_curve; color=:darkorange, linewidth=3, label="Polarized")
+    hlines!(ax3, [0.0]; color=:black, linestyle=:dash, linewidth=2)
+
+    if isfinite(κ_star)
+        vlines!(ax3, [κ_star]; color=:seagreen, linestyle=:dash, linewidth=2)
+    end
+
+    axislegend(ax3, position=:rb)
+
+    return fig
+end
+
+"""
+Plot 8: Lyapunov spectrum
 """
 function plot_lyapunov(κ_range, p_base; tmax=2000.0)
     @info "  Computing Lyapunov exponents..."
@@ -1781,7 +1864,8 @@ function analyze_config(config_path::String)
     # Plot 6: Parameter scan
     try
         @info "Generating Plot 6: Parameter scan"
-        fig = plot_parameter_scan((κ_min, κ_max), p_base; n_points=n_points)
+        dense_points = max(n_points, 400)
+        fig = plot_parameter_scan((κ_min, κ_max), p_base; n_points=dense_points)
         filename = "06_parameter_scan.png"
         save(joinpath(outdir, filename), fig)
         results["parameter_scan"] = filename
@@ -1790,11 +1874,36 @@ function analyze_config(config_path::String)
         @error "  ✗ Failed" exception=e
     end
     
-    # Plot 7: Lyapunov
+    # Plot 7: Calibrated validation
     try
-        @info "Generating Plot 7: Lyapunov spectrum"
+        @info "Generating Plot 7: Calibrated validation"
+        if isfinite(κ_star) && κ_star > 0
+            κ_lo = max(κ_min, κ_star * 0.6)
+            κ_hi = min(κ_max, κ_star * 1.5)
+        else
+            κ_lo, κ_hi = κ_min, κ_max
+        end
+        if κ_hi <= κ_lo || !isfinite(κ_lo) || !isfinite(κ_hi)
+            κ_lo, κ_hi = κ_min, κ_max
+        end
+        if κ_hi <= κ_lo
+            κ_hi = κ_lo + max(abs(κ_lo), 1e-3)
+        end
+        κ_window = range(κ_lo, κ_hi; length=240)
+        fig = plot_calibrated_validation(κ_window, p_base, meta)
+        filename = "07_calibrated_validation.png"
+        save(joinpath(outdir, filename), fig)
+        results["calibrated_validation"] = filename
+        @info "  ✓ Saved: $filename"
+    catch e
+        @error "  ✗ Failed" exception=e
+    end
+
+    # Plot 8: Lyapunov
+    try
+        @info "Generating Plot 8: Lyapunov spectrum"
         fig = plot_lyapunov(κ_range_coarse, p_base; tmax=min(2000.0, cfg["T"]))
-        filename = "07_lyapunov.png"
+        filename = "08_lyapunov.png"
         save(joinpath(outdir, filename), fig)
         results["lyapunov"] = filename
         @info "  ✓ Saved: $filename"
