@@ -153,7 +153,7 @@ Sweep κ and estimate steady-state amplitude (|mean u|) and variance
 """
 function sweep_kappa(p::Params, κgrid::Vector{Float64};
                      N::Int=20_000, T::Float64=300.0, dt::Float64=0.01,
-                     burn_in::Float64=100.0, seed::Int=0)
+                     burn_in::Float64=100.0, seed::Int=0, max_abs::Float64=1e3)
     
     seed != 0 && Random.seed!(seed)
     
@@ -163,15 +163,40 @@ function sweep_kappa(p::Params, κgrid::Vector{Float64};
     
     for (k, κ) in enumerate(κgrid)
         u = zeros(N)
+        mean_acc = 0.0
+        var_acc = 0.0
+        count = 0
+
         for step in 1:sim_params.total_steps
             g = mean(u)
             euler_maruyama_step!(u, κ, g, p, dt)
             reset_step!(u, p, dt)
+
+            if step >= sim_params.burn_in_idx
+                m = mean(u)
+                v = mean(abs2, u)
+
+                if !isfinite(m) || !isfinite(v) || abs(m) > max_abs || v > max_abs^2
+                    amps[k] = NaN
+                    vars[k] = NaN
+                    break
+                end
+
+                mean_acc += m
+                var_acc += v
+                count += 1
+            end
         end
-        
-        # Use final state for statistics (in-place simulation)
-        amps[k] = abs(mean(u))
-        vars[k] = mean(abs2, u)
+
+        if count > 0 && iszero(amps[k])
+            amps[k] = abs(mean_acc / count)
+            vars[k] = var_acc / count
+        elseif isnan(amps[k])
+            continue
+        else
+            amps[k] = abs(mean(u))
+            vars[k] = mean(abs2, u)
+        end
     end
     
     return KappaSweepResult(κgrid, amps, vars)

@@ -133,19 +133,33 @@ Simulate an N-agent system with a small mean-field bias (positive or negative)
 so that the long-run sign is well defined. Returns the final mean belief.
 """
 function order_parameter(p::Params; κ::Float64, N::Int=10_000, T::Float64=200.0,
-                         dt::Float64=0.01, bias::Float64=1e-2, seed::Int=0)
+                         dt::Float64=0.01, bias::Float64=1e-2, seed::Int=0,
+                         max_abs::Float64=200.0)
     seed != 0 && Random.seed!(seed)
 
     steps = Int(floor(T / dt))
     u = randn(N) .* (p.σ / sqrt(2 * p.λ)) .+ bias
 
-    for _ in 1:steps
+    window_start = max(1, Int(floor(0.5 * steps)))
+    acc = 0.0
+    count = 0
+
+    for s in 1:steps
         gbar = mean(u)
         euler_maruyama_step!(u, κ, gbar, p, dt)
         reset_step!(u, p, dt)
+
+        if s >= window_start
+            m = mean(u)
+            if !isfinite(m) || abs(m) > max_abs
+                return NaN
+            end
+            acc += m
+            count += 1
+        end
     end
 
-    return mean(u)
+    return count > 0 ? acc / count : mean(u)
 end
 
 """
