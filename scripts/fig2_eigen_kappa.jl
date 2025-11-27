@@ -9,9 +9,9 @@ using Random
 Figure 2: leading odd eigenvalue λ₁(κ) for the linearised generator.
 """
 function main()
-    Random.seed!(2025)
+    Random.seed!(25)
 
-    p = Params(λ=1.0, σ=0.8, Θ=2.0, c0=0.5, hazard=StepHazard(0.6))
+    p = Params(λ=0.65, σ=1.15, Θ=0.87, c0=0.50, hazard=StepHazard(0.5))
     κgrid = collect(range(0.0, 2.2, length=40))
     λ1 = similar(κgrid)
 
