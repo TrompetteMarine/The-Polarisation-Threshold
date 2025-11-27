@@ -279,7 +279,7 @@ Consult the documents in `docs/` for detailed remediation steps:
 
 Happy replicating!
 
-## Reproducing the JME3 editor-requested figures
+## Reproducing cherry picked-requested figures from the paper
 
 Each script saves a PDF under `figs/` (created automatically). Run them from the
 repository root with the project activated:
