@@ -2,7 +2,11 @@
 
 This repository accompanies the manuscript on the polarisation threshold in Ornstein–Uhlenbeck (OU) belief dynamics with stochastic resets. It provides source code, scripts, and documentation to reproduce every quantitative result and figure reported in the paper, along with diagnostic tools for extended exploration. The codebase is centred on the `BeliefSim.jl` Julia package, which implements Monte Carlo simulators, statistical estimators, and reduced-form bifurcation analyses for the OU-with-resets model.
 
-> **Core theoretical anchors.** The stationary dispersion \(V^*\) solves \(2\lambda V^*=\sigma^2+\Lambda_{\text{reset}}(V^*)\). The critical coupling \(\kappa^*\) is defined spectrally as the unique value where the leading odd eigenvalue of the linearised generator crosses zero. A crude OU-style shortcut \(\kappa^*_{OU} \approx g\,\sigma^2/(2\lambda V^*)\) can be used for back-of-the-envelope intuition, but it is not valid in general once resets and state-dependent hazards matter.
+> **Core theoretical anchors.** 
+
+```latex
+The stationary dispersion \(V^*\) solves \(2\lambda V^*=\sigma^2+\Lambda_{\text{reset}}(V^*)\). The critical coupling \(\kappa^*\) is defined spectrally as the unique value where the leading odd eigenvalue of the linearised generator crosses zero. A crude OU-style shortcut \(\kappa^*_{OU} \approx g\,\sigma^2/(2\lambda V^*)\) can be used for back-of-the-envelope intuition, but it is not valid in general once resets and state-dependent hazards matter.
+```
 
 ---
 
@@ -309,5 +313,3 @@ julia --project=. scripts/fig4_welfare.jl
 - **Figure 3:** Pitchfork bifurcation of the order parameter with symmetric branches from biased simulations.
 - **Figure 4:** Welfare comparison between decentralised and planner solutions, marking \(\kappa^{\text{dec}}\) and \(\kappa^{\text{soc}}\).
 
-Integrate the resulting PDFs into `JME3.tex` using the helper environments in
-`docs/JME3_figures.tex`.
