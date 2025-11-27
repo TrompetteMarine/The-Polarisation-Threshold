@@ -62,7 +62,7 @@ function stationary_density(p::Params; κ::Float64=0.0, T::Float64=400.0,
     start_idx = clamp(Int(floor(burn_in / dt)), 1, length(x))
     xs = @view x[start_idx:end]
 
-    hist = fit(Histogram, xs, nbins; closed=:left)
+    hist = fit(Histogram, xs; nbins=nbins, closed=:left)
     centers = midpoints(hist.edges[1])
     dens = normalize(hist.weights, 1)
     return centers, dens

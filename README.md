@@ -279,7 +279,7 @@ Consult the documents in `docs/` for detailed remediation steps:
 
 Happy replicating!
 
-## Reproducing cherry picked-requested figures from the paper
+## Reproducing the JME3 editor-requested figures
 
 Each script saves a PDF under `figs/` (created automatically). Run them from the
 repository root with the project activated:
@@ -296,4 +296,5 @@ julia --project=. scripts/fig4_welfare.jl
 - **Figure 3:** Pitchfork bifurcation of the order parameter with symmetric branches from biased simulations.
 - **Figure 4:** Welfare comparison between decentralised and planner solutions, marking \(\kappa^{\text{dec}}\) and \(\kappa^{\text{soc}}\).
 
-
+Integrate the resulting PDFs into `JME3.tex` using the helper environments in
+`docs/JME3_figures.tex`.
