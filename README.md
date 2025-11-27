@@ -278,3 +278,23 @@ Consult the documents in `docs/` for detailed remediation steps:
 ---
 
 Happy replicating!
+
+## Reproducing the JME3 editor-requested figures
+
+Each script saves a PDF under `figs/` (created automatically). Run them from the
+repository root with the project activated:
+
+```bash
+julia --project=. scripts/fig1_ou_resets.jl
+julia --project=. scripts/fig2_eigen_kappa.jl
+julia --project=. scripts/fig3_bifurcation.jl
+julia --project=. scripts/fig4_welfare.jl
+```
+
+- **Figure 1:** OU sample path with reset markers and stationary density with/without resets.
+- **Figure 2:** Leading odd eigenvalue \(\lambda_1(\kappa)\) highlighting the zero crossing \(\kappa^*\).
+- **Figure 3:** Pitchfork bifurcation of the order parameter with symmetric branches from biased simulations.
+- **Figure 4:** Welfare comparison between decentralised and planner solutions, marking \(\kappa^{\text{dec}}\) and \(\kappa^{\text{soc}}\).
+
+Integrate the resulting PDFs into `JME3.tex` using the helper environments in
+`docs/JME3_figures.tex`.
