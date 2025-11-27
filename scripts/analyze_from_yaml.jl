@@ -1585,9 +1585,6 @@ function plot_calibrated_validation(κ_range, p_base, meta)
     κ_star = meta.κ_star
     Vstar = meta.Vstar
 
-    prefactor = p_base.g * p_base.σ^2 / (2 * p_base.λ)
-    theory_variance = prefactor ./ κ_vals
-
     theory_amp = if isfinite(κ_star) && κ_star > 0
         sqrt.(clamp.(κ_vals .- κ_star, 0, Inf) ./ κ_star)
     else
@@ -1606,12 +1603,6 @@ function plot_calibrated_validation(κ_range, p_base, meta)
                xlabel="Coupling κ",
                ylabel="Stationary variance V",
                title="κ* calibration via V*")
-
-    valid_var = .!(isinf.(theory_variance) .| isnan.(theory_variance))
-    if any(valid_var)
-        lines!(ax1, κ_vals[valid_var], theory_variance[valid_var];
-               color=:steelblue, linewidth=3, label="Theory V(κ)")
-    end
 
     if isfinite(Vstar) && isfinite(κ_star)
         hlines!(ax1, [Vstar]; color=:gray, linestyle=:dash, linewidth=2)
@@ -1936,10 +1927,9 @@ function analyze_config(config_path::String)
         println(io, "  V* ≈ $(round(p_base.Vstar, digits=6))")
         println(io, "  g ≈ $(round(p_base.g, digits=6))")
         println(io, "  β = $(p_base.beta)")
-        println(io, "  κ* = $(round(κ_star, digits=6))")
-        println(io, "  Theory: κ* = g σ² / (2 λ V*)")
-        theory_val = p_base.g * p_base.σ^2 / (2 * p_base.λ * p_base.Vstar)
-        println(io, "         = $(round(theory_val, digits=6)) (numerical check)")
+        println(io, "  κ* (spectral) = $(round(κ_star, digits=6))")
+        shortcut_val = p_base.g * p_base.σ^2 / (2 * p_base.λ * p_base.Vstar)
+        println(io, "  κ*_{OU} (moment shortcut) ≈ $(round(shortcut_val, digits=6)) — heuristic only")
         println(io, "")
         println(io, "Analysis Range:")
         println(io, "  κ ∈ [$(round(κ_min, digits=3)), $(round(κ_max, digits=3))]")

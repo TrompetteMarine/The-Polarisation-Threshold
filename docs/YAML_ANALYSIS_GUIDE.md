@@ -60,7 +60,7 @@ And calibrates the reduced normal form by Monte Carlo simulation of the full Poi
 - `V*` — stationary dispersion at κ = 0 (estimated via Euler–Maruyama with state-dependent Poisson resets).
 - `g` — odd-mode decay rate at κ = 0 (estimated by injecting a small antisymmetric perturbation).
 - `β = (2λV*/σ²)·κ*` — cubic saturation chosen so the polarized branch obeys `|u₁-u₂|/2 ≈ √((κ-κ*)/κ*)`.
-- `κ* = g σ² / (2 λ V*)` — theoretical polarization threshold (Theorem 1).
+- `κ*` — spectral threshold defined by λ₁(κ*) = 0 where λ₁ is the leading odd eigenvalue of the linearised generator. A shortcut `κ*_{OU} ≈ g σ² / (2 λ V*)` serves only as a coarse OU benchmark and should not be used as general theory.
 
 ## Troubleshooting
 
