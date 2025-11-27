@@ -1,0 +1,37 @@
+% LaTeX helper macros for the editor-requested figures.
+% Insert in JME3.tex near the results/discussion section.
+
+% Figure 1: OU path + stationary density
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{figs/fig1_ou_resets_path.pdf}
+        \caption{Single-agent OU with stochastic resets. Horizontal bands mark \(\pm\Theta\); red dots mark jumps to \(c_0 x_{t^-}\).}
+    \end{subfigure}\hfill
+    \begin{subfigure}[b]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{figs/fig1_ou_resets_density.pdf}
+        \caption{Stationary density \(\bar\rho(x)\) with and without resets.}
+    \end{subfigure}
+    \caption{Illustration of the OU-with-resets mechanism (baseline \(\lambda=1,\sigma=0.8,\Theta=2,c_0=0.5\)).}
+\end{figure}
+
+% Figure 2: eigenvalue vs kappa
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.65\textwidth]{figs/fig2_eigen_kappa.pdf}
+    \caption{Leading odd eigenvalue \(\lambda_1(\kappa)\) of the linearised generator. The zero crossing \(\kappa^*\) marks the loss of stability of the symmetric equilibrium, with positive slope (transversality).}
+\end{figure}
+
+% Figure 3: pitchfork bifurcation
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figs/fig3_bifurcation.pdf}
+    \caption{Supercritical pitchfork for the order parameter \(a^*(\kappa)\). Biased simulations generate the stable polarized branches \(\pm a^*\); the dashed line denotes the central branch \(a=0\) losing stability at \(\kappa^*\).}
+\end{figure}
+
+% Figure 4: welfare comparison
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figs/fig4_welfare.pdf}
+    \caption{Decentralised versus planner welfare. The wedge between \(\kappa^{\text{dec}}\) and \(\kappa^{\text{soc}}\) illustrates the polarisation externality.}
+\end{figure}
