@@ -1,0 +1,61 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath,amssymb,graphicx,subcaption}
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{hyperref}
+
+\title{The Polarisation Threshold: Figures and Notes}
+\author{BeliefSim.jl replication package}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Micro dynamics: OU with stochastic resets}
+Figure~\ref{fig:ou} illustrates the individual belief process with Poisson resets. The left panel shows a sample trajectory with reset markers and bands at $\pm \Theta$; the right panel compares the stationary density with and without resets.
+
+\begin{figure}[t]
+    \centering
+    \begin{subfigure}[b]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{figs/fig1_ou_resets_path.pdf}
+        \caption{Single-agent OU with stochastic resets (baseline $\lambda=1,\,\sigma=0.8,\,\Theta=2,\,c_0=0.5$).}
+    \end{subfigure}\hfill
+    \begin{subfigure}[b]{0.48\textwidth}
+        \includegraphics[width=\textwidth]{figs/fig1_ou_resets_density.pdf}
+        \caption{Stationary density $\bar\rho(x)$ with (red) and without (blue) resets.}
+    \end{subfigure}
+    \caption{Single-agent dynamics and dispersion. Horizontal lines mark the reset band $\pm\Theta$; red markers denote jumps to $c_0 x_{t^-}$.}
+    \label{fig:ou}
+\end{figure}
+
+\section{Spectral threshold and pitchfork}
+The stability threshold $\kappa^*$ is defined by the spectral condition $\lambda_1(\kappa^*) = 0$, where $\lambda_1$ is the leading odd eigenvalue of the linearised generator. Figure~\ref{fig:eigen} shows $\lambda_1(\kappa)$ and its zero crossing; Figure~\ref{fig:pitchfork} reports the resulting supercritical pitchfork for the order parameter $a(\kappa)$.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.7\textwidth]{figs/fig2_eigen_kappa.pdf}
+    \caption{Leading odd eigenvalue $\lambda_1(\kappa)$. The vertical line highlights the spectral threshold $\kappa^*$ where stability changes sign.}
+    \label{fig:eigen}
+\end{figure}
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.75\textwidth]{figs/fig3_bifurcation.pdf}
+    \caption{Supercritical pitchfork for the polarization amplitude $a^*(\kappa)$. The dashed branch at $a=0$ loses stability at $\kappa^*$; coloured curves report simulated polarized states.}
+    \label{fig:pitchfork}
+\end{figure}
+
+\section{Welfare and the externality wedge}
+Figure~\ref{fig:welfare} compares decentralised and planner welfare across coupling strengths. The planner internalises fragility from polarization, leading to a lower optimal exposure $\kappa^{\text{soc}}$ than the decentralised choice $\kappa^{\text{dec}}$.
+
+\begin{figure}[t]
+    \centering
+    \includegraphics[width=0.75\textwidth]{figs/fig4_welfare.pdf}
+    \caption{Decentralised versus planner welfare. Vertical markers show $\kappa^{\text{dec}}$ and $\kappa^{\text{soc}}$; the shaded band emphasises the externality wedge.}
+    \label{fig:welfare}
+\end{figure}
+
+\section{Note on $\kappa^*$ heuristics}
+The operational definition of the polarisation threshold is spectral: $\kappa^*$ solves $\lambda_1(\kappa^*)=0$. Earlier back-of-the-envelope shortcuts of the form $\kappa^*\propto 1/V^*$ are retained only as OU-style heuristics and are not generally valid once stochastic resets and state-dependent hazards are present.
+
+\end{document}
