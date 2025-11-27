@@ -296,5 +296,4 @@ julia --project=. scripts/fig4_welfare.jl
 - **Figure 3:** Pitchfork bifurcation of the order parameter with symmetric branches from biased simulations.
 - **Figure 4:** Welfare comparison between decentralised and planner solutions, marking \(\kappa^{\text{dec}}\) and \(\kappa^{\text{soc}}\).
 
-Integrate the resulting PDFs into `JME3.tex` using the helper environments in
-`docs/JME3_figures.tex`.
+
