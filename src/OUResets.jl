@@ -117,7 +117,7 @@ function leading_odd_eigenvalue(p::Params; κ::Float64, L::Float64=5.0, M::Int=4
     vecs = eig.vectors
 
     # Pick eigenvalue most aligned with odd basis x
-    weights = similar(vals)
+    weights = zeros(Float64, length(vals))
     for j in eachindex(vals)
         v = vecs[:, j]
         weights[j] = abs(dot(v, x)) / (norm(v) * norm(x))
