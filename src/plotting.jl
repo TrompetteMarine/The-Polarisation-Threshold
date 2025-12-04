@@ -23,9 +23,9 @@ function create_base_plot(;kwargs...)
     plot(; merge(PLOT_DEFAULTS, Dict(kwargs...))...)
 end
 
-function plot_bifurcation(res::KappaSweepResult; κstar=nothing, 
+function plot_bifurcation(res::KappaSweepResult; κstar=nothing,
                          title="Bifurcation Diagram",
-                         extend_factor=2.0, num_points=2000)
+                         extend_factor=2.0, num_points=5000)
     # Create plot
     plt = plot(
         xlabel="Coupling strength κ",
@@ -53,28 +53,30 @@ function plot_bifurcation(res::KappaSweepResult; κstar=nothing,
         
         # Pre-bifurcation stable branch
         κ_pre = κ_extended[κ_extended .≤ κstar]
-        plot!(plt, κ_pre, zeros(length(κ_pre)), 
-              color=:black, linewidth=3, label="Stable")
-        
-        # Post-bifurcation branches
+        plot!(plt, κ_pre, zeros(length(κ_pre)),
+              color=:black, linewidth=3.5, alpha=0.9, label="Stable")
+
+        # Post-bifurcation branches with refined grid near κ* for smoothness
         κ_post = κ_extended[κ_extended .> κstar]
+        # Compute stable branches with smooth square root
         stable_branches = @. sqrt(max(0, (κ_post - κstar) / κstar))
-        
+
         # Unstable middle branch
-        plot!(plt, κ_post, zeros(length(κ_post)), 
-              color=:black, linestyle=:dash, linewidth=2, label="Unstable")
+        plot!(plt, κ_post, zeros(length(κ_post)),
+              color=:black, linestyle=:dash, linewidth=2.5, alpha=0.6, label="Unstable")
+
+        # Stable polarized branches with professional styling
+        plot!(plt, κ_post, stable_branches,
+              color=:black, linewidth=3.5, alpha=0.9, label=nothing)
+        plot!(plt, κ_post, -stable_branches,
+              color=:black, linewidth=3.5, alpha=0.9, label=nothing)
         
-        # Stable polarized branches
-        plot!(plt, κ_post, stable_branches, 
-              color=:black, linewidth=3, label=nothing)
-        plot!(plt, κ_post, -stable_branches, 
-              color=:black, linewidth=3, label=nothing)
-        
-        # Critical point
-        scatter!(plt, [κstar], [0], 
-                color=:red, markersize=6, label="κ*")
-        vline!(plt, [κstar], color=:red, linestyle=:dash, 
-               alpha=0.3, label=nothing)
+        # Critical point with professional marker
+        scatter!(plt, [κstar], [0],
+                color=:red, markersize=8, markerstrokewidth=2,
+                markerstrokecolor=:darkred, label="κ*")
+        vline!(plt, [κstar], color=:red, linestyle=:dash,
+               linewidth=2.0, alpha=0.4, label=nothing)
     end
     
     return plt

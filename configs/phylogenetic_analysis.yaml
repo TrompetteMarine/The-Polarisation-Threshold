@@ -1,0 +1,242 @@
+# ============================================================================
+# Phylogenetic Bifurcation Analysis Configuration
+#
+# This configuration file specifies all parameters for generating the
+# phylogenetic "tuning fork" bifurcation diagram and related analyses.
+# ============================================================================
+
+name: phylogenetic_tree
+description: "Dense parameter sweep for phylogenetic bifurcation diagram"
+seed: 2025
+
+# ============================================================================
+# Micro-level parameters (OU process with resets)
+# ============================================================================
+params:
+  lambda: 1.0          # Individual relaxation rate
+  sigma: 0.8           # Noise intensity
+  theta: 2.0           # Reset hazard threshold
+  c0: 0.5              # Reset contraction factor
+
+  # Reset hazard function
+  hazard:
+    kind: step         # Options: "step", "logistic"
+    nu0: 0.6           # Base hazard rate (for step hazard)
+    # For logistic hazard, add:
+    # steepness: 2.0
+    # midpoint: 1.5
+
+# ============================================================================
+# Stationary dispersion and critical κ estimation
+# ============================================================================
+estimation:
+  # Settings for V* estimation (at κ=0)
+  Vstar_estimation:
+    N: 20000           # Population size
+    T: 300.0           # Total simulation time
+    burn_in: 100.0     # Burn-in period
+    dt: 0.01           # Time step
+    seed: 2025
+
+  # Settings for κ* estimation (spectral method)
+  kappa_star_estimation:
+    N: 20000
+    T: 350.0
+    burn_in: 120.0
+    dt: 0.01
+    seed: 2026
+
+# ============================================================================
+# Normal form calibration
+# ============================================================================
+normal_form:
+  # If calibrate=true, estimate μ_slope from V* and σ
+  # Otherwise, use override values
+  calibrate: true
+
+  # Optional overrides (used if calibrate=false)
+  b_override: null              # Cubic coefficient (null = use default 0.5)
+  mu_slope_override: null       # Transversality slope (null = compute from V*)
+
+  # Default cubic coefficient when not specified
+  b_default: 0.5
+
+# ============================================================================
+# Phylogenetic sweep settings
+# ============================================================================
+phylogenetic_sweep:
+  kappa_points: 500              # Number of κ values in sweep
+  kappa_max_factor: 2.0          # Upper bound: κ_max = factor * κ*
+  n_initial_conditions: 30       # ICs per κ value
+  a_range: [-3.0, 3.0]           # Range for IC sampling
+  T_burn: 500.0                  # Base burn-in time
+  T_sample: 100.0                # Sampling time (for future extensions)
+  dt: 0.01                       # Integration time step
+  cluster_tolerance: 0.05        # Tolerance for attractor clustering
+  adaptive_burn: true            # Use adaptive burn-in near κ*
+  seed: 2027
+
+# ============================================================================
+# Particle system validation (optional)
+# ============================================================================
+particle_validation:
+  enabled: false                 # Set to true to validate against full MC
+  N: 20000                       # Population size for validation
+  kappa_samples: 25              # Number of κ values to validate
+  kappa_sample_method: "linspace"  # "linspace" or "logspace" near κ*
+  T: 300.0                       # Simulation time
+  burn_in: 100.0                 # Burn-in period
+  dt: 0.01
+  n_runs: 5                      # Repeat runs for error bars
+
+# ============================================================================
+# Phase portrait gallery
+# ============================================================================
+phase_portraits:
+  # κ values as fractions of κ*
+  kappa_ratios: [0.5, 0.9, 0.99, 1.01, 1.2, 1.5]
+  a_lim: 3.0                     # Axis limits ±a_lim
+  n_trajectories: 10             # Sample trajectories per panel
+  T_integrate: 50.0              # Integration time for trajectories
+  dt: 0.01
+
+# ============================================================================
+# Basin of attraction evolution
+# ============================================================================
+basin_evolution:
+  kappa_ratios: [1.05, 1.2, 1.5]  # Focus on κ > κ* where basins split
+  a_grid_size: 300                # Resolution of IC grid
+  T_integrate: 100.0              # Integration time to classify attractor
+  dt: 0.01
+
+# ============================================================================
+# Trajectory fates
+# ============================================================================
+trajectory_fates:
+  kappa_below_factor: 0.8        # κ_below = factor * κ*
+  kappa_above_factor: 1.3        # κ_above = factor * κ*
+  n_trajectories: 10             # Number of sample trajectories
+  T_max: 100.0                   # Maximum integration time
+  dt: 0.01
+
+# ============================================================================
+# Scaling analysis
+# ============================================================================
+scaling_analysis:
+  # Fit |a*(κ)| = C(κ - κ*)^β for κ in specified range
+  kappa_range_factors: [1.05, 1.5]  # Fit in (1.05κ*, 1.5κ*)
+  expected_beta: 0.5                 # Expected scaling exponent
+  tolerance: 0.1                     # Warn if |β - 0.5| > tolerance
+
+# ============================================================================
+# Visualization settings
+# ============================================================================
+plotting:
+  backend: "cairomakie"          # "cairomakie" or "plots"
+
+  # Main phylogenetic diagram
+  phylogenetic_diagram:
+    resolution: [900, 650]
+    fontsize: 14
+    stable_color: "steelblue"
+    unstable_color: "gray"
+    stable_alpha: 0.7
+    unstable_alpha: 0.4
+    theory_line_color: "red"
+    theory_line_style: "dash"
+    critical_line_color: "black"
+    critical_line_style: "dot"
+
+  # Inset scaling plot
+  inset:
+    enabled: true
+    width_fraction: 0.32
+    height_fraction: 0.32
+    position: "bottom_right"     # "bottom_right", "top_left", etc.
+
+  # Phase portraits
+  phase_portrait_gallery:
+    resolution: [1400, 900]
+    layout: [2, 3]               # 2 rows × 3 columns
+    aspect_ratio: "equal"
+    trajectory_color: "steelblue"
+    trajectory_alpha: 0.3
+    equilibrium_stable_color: "red"
+    equilibrium_unstable_color: "white"
+
+  # Basin evolution
+  basin_plots:
+    resolution: [1200, 400]
+    negative_basin_color: "blue"
+    positive_basin_color: "red"
+    consensus_basin_color: "gray"
+
+  # Trajectory fates
+  trajectory_plots:
+    resolution: [1200, 500]
+    trajectory_color: "steelblue"
+    trajectory_alpha: 0.6
+    attractor_line_color: "red"
+    attractor_line_style: "dash"
+
+# ============================================================================
+# Output settings
+# ============================================================================
+output:
+  dir: "outputs/phylogenetic_analysis"
+  figures_dir: "figs"
+  formats: ["pdf", "png"]       # Output formats
+  dpi: 300                       # DPI for raster formats
+  save_data: true                # Save numerical results as CSV
+  save_summary: true             # Save text summary
+
+# ============================================================================
+# Computational settings
+# ============================================================================
+computation:
+  parallel: false                # Use parallel processing (future)
+  num_threads: 4                 # Number of threads if parallel=true
+  verbose: true                  # Print progress messages
+  log_level: "info"              # "debug", "info", "warn", "error"
+
+# ============================================================================
+# Validation tests
+# ============================================================================
+validation:
+  # Automatically run validation tests after analysis
+  run_tests: true
+
+  tests:
+    - name: "Equilibrium accuracy"
+      description: "Verify |a*_numerical - √(μ/b)| < threshold"
+      threshold: 0.01
+
+    - name: "Symmetry check"
+      description: "Confirm ±a* branches symmetric to precision"
+      precision: 1.0e-6
+
+    - name: "Scaling exponent"
+      description: "Verify β ≈ 0.5 for supercritical bifurcation"
+      expected: 0.5
+      tolerance: 0.05
+
+    - name: "No hysteresis"
+      description: "Forward/backward sweeps produce identical diagrams"
+      enabled: false              # Disabled by default (computationally expensive)
+
+# ============================================================================
+# Notes
+# ============================================================================
+notes: |
+  This configuration generates:
+  1. Phylogenetic bifurcation diagram (figs/phylogenetic_bifurcation.pdf)
+  2. Phase portrait gallery (figs/phase_portrait_gallery.pdf)
+  3. Basin evolution (figs/basin_evolution.pdf)
+  4. Trajectory fates (figs/trajectory_fates.pdf)
+
+  To run the analysis with this config:
+    julia scripts/run_phylogenetic_analysis_from_yaml.jl configs/phylogenetic_analysis.yaml
+
+  Or run individual scripts:
+    julia scripts/fig_phylogenetic_tree.jl
+    julia scripts/fig_attractor_evolution.jl

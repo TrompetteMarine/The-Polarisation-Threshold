@@ -53,4 +53,8 @@ function __init__()
     end
 end
 
+# Note: Advanced bifurcation analysis modules (PhylogeneticDiagram, etc.)
+# are available in src/bifurcation/ and can be loaded explicitly when needed.
+# See scripts/fig_phylogenetic_tree.jl for usage examples.
+
 end # module

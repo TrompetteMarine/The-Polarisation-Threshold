@@ -6,6 +6,7 @@ using BeliefSim.Stats
 using Plots
 using Statistics
 using Random
+using Printf
 
 # ----------------------------------------------------------------------
 # Helpers
@@ -149,8 +150,9 @@ function main()
     savefig(plt, "figs/fig4_welfare.pdf")
 
     # Welfare contours across (κ, V*) obtained by varying σ to span different dispersions
-    σgrid = collect(range(0.6, 1.3, length=9))
-    κgrid_contour = collect(range(first(κgrid), last(κgrid), length=36))
+    # Increased resolution for smoother contours: 9→15 V* levels, 36→60 κ points
+    σgrid = collect(range(0.6, 1.3, length=15))
+    κgrid_contour = collect(range(first(κgrid), last(κgrid), length=60))
     nκ = length(κgrid_contour)
     nσ = length(σgrid)
 
@@ -185,6 +187,24 @@ function main()
     κ_dec_ridge = κ_dec_ridge[perm]
     κ_soc_ridge = κ_soc_ridge[perm]
 
+    # Apply median filter to smooth ridge lines (removes discontinuous jumps from argmax)
+    function median_filter(x, window_size=3)
+        n = length(x)
+        if n < window_size
+            return x
+        end
+        filtered = similar(x)
+        half = div(window_size, 2)
+        for i in 1:n
+            i_start = max(1, i - half)
+            i_end = min(n, i + half)
+            filtered[i] = median(x[i_start:i_end])
+        end
+        return filtered
+    end
+    κ_dec_ridge = median_filter(κ_dec_ridge, 3)
+    κ_soc_ridge = median_filter(κ_soc_ridge, 3)
+
     # Drop any rows where V* is non-finite to avoid degenerate contours
     finite_mask_rows = isfinite.(Vstar_sorted)
     if !all(finite_mask_rows)
@@ -203,7 +223,8 @@ function main()
 
     # Clip color limits to informative quantiles while ignoring NaNs
     clims_common = finite_clims(W_dec_surface, W_soc_surface)
-    levels = range(clims_common[1], clims_common[2]; length=14)
+    # Increased contour levels for smoother appearance (14→24)
+    levels = range(clims_common[1], clims_common[2]; length=24)
     @info "Shared clims for contours" clims=clims_common levels=levels
     print_histogram(filter(isfinite, vec(W_dec_surface)); bins=12)
     print_histogram(filter(isfinite, vec(W_soc_surface)); bins=12)
@@ -225,22 +246,191 @@ function main()
     contourf!(plt_contour[1], κgrid_contour, Vstar_sorted, W_dec_plot;
               title="Decentralised welfare", xlabel="κ", ylabel="V*",
               c=:viridis, levels=levels, clims=clims_common, legend=:topright,
-              fillalpha=0.95, linealpha=0.7, nan_color=:white)
-    plot!(plt_contour[1], κ_dec_ridge, Vstar_sorted; color=:black, linewidth=2.4,
-          label="κ^dec(V*)")
+              fillalpha=0.98, linealpha=0.3, linewidth=0.5, nan_color=:white)
+    plot!(plt_contour[1], κ_dec_ridge, Vstar_sorted; color=:black, linewidth=3.0,
+          linestyle=:solid, label="κ^dec(V*)")
     xlims!(plt_contour[1], (minimum(κgrid_contour), κ_max_view))
 
     contourf!(plt_contour[2], κgrid_contour, Vstar_sorted, W_soc_plot;
               title="Planner welfare", xlabel="κ", ylabel="V*",
               c=:plasma, levels=levels, clims=clims_common, legend=:topright,
-              fillalpha=0.95, linealpha=0.7, nan_color=:white)
-    plot!(plt_contour[2], κ_soc_ridge, Vstar_sorted; color=:black, linewidth=2.4,
-          label="κ^soc(V*)")
+              fillalpha=0.98, linealpha=0.3, linewidth=0.5, nan_color=:white)
+    plot!(plt_contour[2], κ_soc_ridge, Vstar_sorted; color=:black, linewidth=3.0,
+          linestyle=:solid, label="κ^soc(V*)")
     xlims!(plt_contour[2], (minimum(κgrid_contour), κ_max_view))
 
     savefig(plt_contour, "figs/fig4_welfare_contour.pdf")
 
-    # Visualize missing regions explicitly
+    # ========================================================================
+    # Enhanced three-panel figure: Decentralised, Planner, Externality Wedge
+    # ========================================================================
+
+    println("   Creating enhanced three-panel welfare analysis...")
+
+    # Compute welfare difference (externality)
+    W_diff = W_soc_surface - W_dec_surface
+    W_diff_plot = copy(W_diff)
+    # Use symmetric color limits for difference plot
+    diff_max = maximum(abs.(filter(isfinite, vec(W_diff))))
+    clims_diff = (-diff_max, diff_max)
+    # Fill NaNs with zero for difference plot
+    map!(x -> isfinite(x) ? x : 0.0, W_diff_plot, W_diff_plot)
+
+    plt_enhanced = plot(layout=(1, 3), size=(1800, 500), dpi=300,
+                       margin=6Plots.mm,
+                       plot_title="Welfare Analysis: Decentralised vs Planner",
+                       plot_titlefontsize=16)
+
+    # Panel 1: Decentralised welfare
+    contourf!(plt_enhanced[1], κgrid_contour, Vstar_sorted, W_dec_plot;
+              title="Decentralised", xlabel="κ", ylabel="V*",
+              c=:viridis, levels=24, clims=clims_common,
+              fillalpha=0.95, linewidth=0.8, linecolor=:black, linealpha=0.25)
+    plot!(plt_enhanced[1], κ_dec_ridge, Vstar_sorted;
+          color=:red, linewidth=3.5, linestyle=:solid,
+          label="κ^{dec}(V*)", legend=:topright, legendfontsize=10)
+    # Add markers at key V* values
+    V_markers = [minimum(Vstar_sorted), median(Vstar_sorted), maximum(Vstar_sorted)]
+    for Vm in V_markers
+        idx = argmin(abs.(Vstar_sorted .- Vm))
+        scatter!(plt_enhanced[1], [κ_dec_ridge[idx]], [Vstar_sorted[idx]];
+                markersize=6, color=:red, markerstrokewidth=2,
+                markerstrokecolor=:white, label=nothing)
+    end
+    xlims!(plt_enhanced[1], (minimum(κgrid_contour), κ_max_view))
+
+    # Panel 2: Planner welfare
+    contourf!(plt_enhanced[2], κgrid_contour, Vstar_sorted, W_soc_plot;
+              title="Planner", xlabel="κ", ylabel="V*",
+              c=:plasma, levels=24, clims=clims_common,
+              fillalpha=0.95, linewidth=0.8, linecolor=:black, linealpha=0.25)
+    plot!(plt_enhanced[2], κ_soc_ridge, Vstar_sorted;
+          color=:cyan, linewidth=3.5, linestyle=:solid,
+          label="κ^{soc}(V*)", legend=:topright, legendfontsize=10)
+    for Vm in V_markers
+        idx = argmin(abs.(Vstar_sorted .- Vm))
+        scatter!(plt_enhanced[2], [κ_soc_ridge[idx]], [Vstar_sorted[idx]];
+                markersize=6, color=:cyan, markerstrokewidth=2,
+                markerstrokecolor=:white, label=nothing)
+    end
+    xlims!(plt_enhanced[2], (minimum(κgrid_contour), κ_max_view))
+
+    # Panel 3: Welfare difference (externality wedge)
+    contourf!(plt_enhanced[3], κgrid_contour, Vstar_sorted, W_diff_plot;
+              title="Planner - Decentralised (Externality)", xlabel="κ", ylabel="V*",
+              c=:RdBu, levels=20, clims=clims_diff,
+              fillalpha=0.95, linewidth=0.8, linecolor=:black, linealpha=0.25)
+    # Overlay both optimal ridges
+    plot!(plt_enhanced[3], κ_dec_ridge, Vstar_sorted;
+          color=:red, linewidth=2.5, linestyle=:dash,
+          label="κ^{dec}", legend=:topright, legendfontsize=10)
+    plot!(plt_enhanced[3], κ_soc_ridge, Vstar_sorted;
+          color=:cyan, linewidth=2.5, linestyle=:dash,
+          label="κ^{soc}")
+    # Add zero contour (where welfare is equal)
+    contour!(plt_enhanced[3], κgrid_contour, Vstar_sorted, W_diff_plot;
+             levels=[0.0], linewidth=3, linecolor=:black,
+             linestyle=:solid, label="W^{soc} = W^{dec}")
+    xlims!(plt_enhanced[3], (minimum(κgrid_contour), κ_max_view))
+
+    savefig(plt_enhanced, "figs/fig4_welfare_enhanced.pdf")
+
+    # ========================================================================
+    # Cross-section plots: Welfare vs κ at selected V* values
+    # ========================================================================
+
+    println("   Creating welfare cross-sections...")
+
+    # Select 3 representative V* values
+    V_low = quantile(Vstar_sorted, 0.25)
+    V_mid = median(Vstar_sorted)
+    V_high = quantile(Vstar_sorted, 0.75)
+    V_selected = [V_low, V_mid, V_high]
+
+    plt_crosssec = plot(layout=(1, 3), size=(1800, 450), dpi=300,
+                        margin=6Plots.mm,
+                        plot_title="Welfare Cross-Sections at Different Dispersion Levels",
+                        plot_titlefontsize=16)
+
+    for (panel_idx, V_target) in enumerate(V_selected)
+        # Find closest V* in grid
+        V_idx = argmin(abs.(Vstar_sorted .- V_target))
+        V_actual = Vstar_sorted[V_idx]
+
+        # Extract welfare cross-sections
+        W_dec_slice = W_dec_surface[V_idx, :]
+        W_soc_slice = W_soc_surface[V_idx, :]
+        W_diff_slice = W_diff[V_idx, :]
+
+        # Plot with proper masking
+        valid_mask = isfinite.(W_dec_slice) .& isfinite.(W_soc_slice)
+        κ_valid = κgrid_contour[valid_mask]
+
+        plot!(plt_crosssec[panel_idx], κ_valid, W_dec_slice[valid_mask];
+              linewidth=3, color=:blue, label="Decentralised",
+              xlabel="Social coupling κ", ylabel="Welfare",
+              title=@sprintf("V* = %.3f", V_actual),
+              legend=:bottomright, legendfontsize=9,
+              grid=true, gridstyle=:dash, gridalpha=0.3)
+        plot!(plt_crosssec[panel_idx], κ_valid, W_soc_slice[valid_mask];
+              linewidth=3, color=:red, label="Planner")
+
+        # Mark optimal κ values
+        κ_dec_opt = κ_dec_ridge[V_idx]
+        κ_soc_opt = κ_soc_ridge[V_idx]
+
+        if κ_dec_opt in κ_valid
+            vline!(plt_crosssec[panel_idx], [κ_dec_opt];
+                   color=:blue, linestyle=:dash, linewidth=2,
+                   alpha=0.6, label=@sprintf("κ^{dec} = %.2f", κ_dec_opt))
+        end
+        if κ_soc_opt in κ_valid
+            vline!(plt_crosssec[panel_idx], [κ_soc_opt];
+                   color=:red, linestyle=:dash, linewidth=2,
+                   alpha=0.6, label=@sprintf("κ^{soc} = %.2f", κ_soc_opt))
+        end
+    end
+
+    savefig(plt_crosssec, "figs/fig4_welfare_crosssections.pdf")
+
+    # ========================================================================
+    # Optimal κ comparison plot
+    # ========================================================================
+
+    println("   Creating optimal κ comparison...")
+
+    plt_optimal = plot(size=(800, 500), dpi=300,
+                      xlabel="Stationary dispersion V*",
+                      ylabel="Optimal social coupling κ",
+                      title="Welfare-Maximizing Coupling Strength",
+                      legend=:bottomright,
+                      grid=true, gridstyle=:dash, gridalpha=0.3,
+                      margin=5Plots.mm)
+
+    plot!(plt_optimal, Vstar_sorted, κ_dec_ridge;
+          linewidth=3.5, color=:blue, label="κ^{dec}(V*) - Decentralised",
+          linestyle=:solid)
+    plot!(plt_optimal, Vstar_sorted, κ_soc_ridge;
+          linewidth=3.5, color=:red, label="κ^{soc}(V*) - Planner",
+          linestyle=:solid)
+
+    # Fill between to show wedge
+    plot!(plt_optimal, Vstar_sorted, κ_dec_ridge;
+          fillrange=κ_soc_ridge, fillalpha=0.2, fillcolor=:purple,
+          linewidth=0, label="Policy wedge")
+
+    # Add annotations
+    mid_idx = div(length(Vstar_sorted), 2)
+    annotate!(plt_optimal, Vstar_sorted[mid_idx],
+             (κ_dec_ridge[mid_idx] + κ_soc_ridge[mid_idx])/2,
+             text("Externality\ngap", 11, :center, :purple))
+
+    savefig(plt_optimal, "figs/fig4_welfare_optimal_comparison.pdf")
+
+    # ========================================================================
+    # Diagnostic: NaN mask visualization
+    # ========================================================================
+
     mask_grad = cgrad([:transparent, :black])
     plt_mask = plot(layout=(1, 2), size=(900, 430), dpi=300, margin=5Plots.mm)
     heatmap!(plt_mask[1], κgrid_contour, Vstar_sorted, float(nan_mask_dec);
@@ -250,6 +440,12 @@ function main()
              xlabel="κ", ylabel="V*", title="NaN mask (Planner)",
              c=mask_grad, clims=(0, 1), legend=false)
     savefig(plt_mask, "figs/fig4_welfare_nanmask.pdf")
+
+    println("   ✓ Enhanced welfare figures saved:")
+    println("      • fig4_welfare_enhanced.pdf (3-panel with externality)")
+    println("      • fig4_welfare_crosssections.pdf (welfare vs κ slices)")
+    println("      • fig4_welfare_optimal_comparison.pdf (κ^dec vs κ^soc)")
+    println("      • fig4_welfare_nanmask.pdf (diagnostic)")
 end
 
 if abspath(PROGRAM_FILE) == @__FILE__

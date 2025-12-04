@@ -1210,8 +1210,8 @@ function plot_phase_portraits(κ_values, p_base)
         κ_star = getproperty(p, :kstar)
         title_str = "Phase Space: " * format_ratio_label(κ, κ_star)
         ax = Axis(fig[row, col];
-                 xlabel="u₁ (agent 1)",
-                 ylabel="u₂ (agent 2)",
+                 xlabel="u₁",
+                 ylabel="u₂",
                  title=title_str,
                  aspect=DataAspect())
         
@@ -1381,8 +1381,8 @@ function plot_timeseries(κ, p_base; u0=[0.5, -0.5], tmax=500.0, dt=0.1)
     # Panel 1: beliefs
     ax1 = Axis(fig[1, 1:2]; xlabel="Time", ylabel="Belief",
                title="Evolution: " * label_ratio)
-    lines!(ax1, t, u1;  color=:blue,  linewidth=1.8, label="Agent 1")
-    lines!(ax1, t, u2;  color=:red,   linewidth=1.8, label="Agent 2")
+    lines!(ax1, t, u1;  color=:blue,  linewidth=1.8, label="u_1 (time step t)")
+    lines!(ax1, t, u2;  color=:red,   linewidth=1.8, label="u_2 (time step t+1)")
     lines!(ax1, t, m;   color=:green, linewidth=2.0, label="Mean")
     hlines!(ax1, [0]; color=:black, linestyle=:dash, linewidth=1)
     axislegend(ax1, position=:rt)

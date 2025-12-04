@@ -15,7 +15,8 @@ function main()
     p = Params(λ=1.0, σ=0.8, Θ=2.0, c0=0.5, hazard=StepHazard(0.6))
     κstar = critical_kappa(p; N=15_000, T=350.0, dt=0.01, burn_in=120.0, seed=11)
     κmax = 1.6 * κstar
-    κgrid = collect(range(0.0, κmax, length=24))
+    # Increased resolution for smoother bifurcation curves (24→50 points)
+    κgrid = collect(range(0.0, κmax, length=50))
 
     # Symmetric sweep using built-in routine (returns |mean|)
     res = sweep_kappa(p, κgrid; N=15_000, T=350.0, dt=0.01, burn_in=120.0, seed=18, max_abs=500.0)
@@ -30,16 +31,24 @@ function main()
 
     mkpath("figs")
     plt = plot(; xlabel="κ", ylabel="a*(κ)", title="Pitchfork bifurcation",
-               legend=:topleft, size=(750, 450), dpi=300)
+               legend=:topleft, size=(750, 450), dpi=300,
+               grid=false, background_color=:white, foreground_color=:black,
+               fontfamily="Computer Modern")
     mask_pos = isfinite.(pos_branch)
     mask_neg = isfinite.(neg_branch)
     mask_res = isfinite.(res.amp)
 
-    plot!(plt, κgrid[mask_pos], pos_branch[mask_pos]; color=:red, linewidth=2.5, label="Stable branch +")
-    plot!(plt, κgrid[mask_neg], neg_branch[mask_neg]; color=:blue, linewidth=2.5, label="Stable branch -")
-    plot!(plt, κgrid, zeros(length(κgrid)); color=:black, linestyle=:dash, label="Central branch")
-    scatter!(plt, κgrid[mask_res], res.amp[mask_res]; color=:black, markershape=:diamond, label="|mean(u)| sweep")
-    vline!(plt, [κstar]; color=:gray, linestyle=:dash, label="κ*")
+    # Professional smooth curves with increased linewidth
+    plot!(plt, κgrid[mask_pos], pos_branch[mask_pos]; color=:red, linewidth=3.0,
+          alpha=0.9, label="Stable branch +")
+    plot!(plt, κgrid[mask_neg], neg_branch[mask_neg]; color=:blue, linewidth=3.0,
+          alpha=0.9, label="Stable branch -")
+    plot!(plt, κgrid, zeros(length(κgrid)); color=:black, linestyle=:dash,
+          linewidth=2.0, alpha=0.7, label="Central branch")
+    scatter!(plt, κgrid[mask_res], res.amp[mask_res]; color=:black, markershape=:diamond,
+             markersize=3, alpha=0.5, label="|mean(u)| sweep")
+    vline!(plt, [κstar]; color=:gray, linestyle=:dashdot, linewidth=2.0,
+           alpha=0.6, label="κ*")
 
     savefig(plt, "figs/fig3_bifurcation.pdf")
 end

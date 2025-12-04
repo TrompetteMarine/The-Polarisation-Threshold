@@ -195,6 +195,66 @@ julia --project=. scripts/fig4_welfare.jl
 
 Each script sets its own seed for reproducibility and writes the corresponding `figs/fig*.pdf` file consumed by `jme4.tex`.
 
+### 8. Phylogenetic bifurcation diagrams
+
+The repository includes advanced tools for generating "phylogenetic tree" bifurcation diagrams that show the complete attractor structure as κ sweeps through the critical threshold. These diagrams are analogous to the classic logistic map bifurcation diagrams but with the clean supercritical pitchfork structure of this model.
+
+**Main phylogenetic diagram:**
+```bash
+julia --project=. scripts/fig_phylogenetic_tree.jl
+```
+
+This script:
+- Calibrates the reduced normal form from micro-level parameters
+- Performs a dense parameter sweep (500 κ points, 30 initial conditions each)
+- Classifies equilibria as stable or unstable
+- Generates a publication-quality "tuning fork" diagram with theoretical envelope
+- Includes an inset verifying the β = 0.5 scaling exponent
+
+**Attractor evolution gallery:**
+```bash
+julia --project=. scripts/fig_attractor_evolution.jl
+```
+
+This generates:
+- Phase portrait gallery (2×3 grid) showing flow evolution across κ
+- Basin of attraction evolution showing how basins split at the bifurcation
+- Trajectory fate comparison (κ < κ* vs κ > κ*)
+
+**Configuration:**
+
+For batch processing or custom parameter sets, use the YAML configuration:
+```bash
+# Edit configs/phylogenetic_analysis.yaml to customize parameters
+julia --project=. scripts/run_phylogenetic_analysis_from_yaml.jl configs/phylogenetic_analysis.yaml
+```
+
+The YAML configuration controls:
+- Sweep resolution and initial condition sampling
+- Adaptive burn-in near the critical point
+- Particle system validation (optional)
+- Visualization settings and output formats
+
+**Module documentation:**
+
+The core implementation is in `src/bifurcation/PhylogeneticDiagram.jl`, which provides:
+- `NormalFormParams`: Structure for the reduced cubic normal form ȧ = μ(κ)·a - b·a³
+- `phylogenetic_sweep`: Dense parameter sweep with attractor classification
+- `calibrate_normal_form`: Automatic calibration from V* and κ*
+- `scaling_exponent`: Verification of the β = 0.5 supercritical scaling
+
+Load the module explicitly when needed:
+```julia
+include("src/bifurcation/PhylogeneticDiagram.jl")
+using .PhylogeneticDiagram
+```
+
+**Requirements:**
+
+- CairoMakie is recommended for professional vector graphics output
+- Falls back to Plots.jl if CairoMakie is unavailable
+- All core functionality works with the base BeliefSim installation
+
 ---
 
 ## YAML configuration reference
