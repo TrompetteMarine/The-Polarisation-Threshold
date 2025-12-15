@@ -2,7 +2,7 @@ module BeliefSim
 
 # Import standard library first
 using Statistics, Random, LinearAlgebra, Printf
-using Plots
+using Plots, LaTeXStrings
 
 # Set default backend without pyplot
 ENV["GKSwstype"] = "100"

@@ -54,6 +54,8 @@ using BeliefSim.Simulate
     end
 end
 
+include("test_welfare_mfc.jl")
+
 # Include bifurcation tests only if available
 if isdefined(Main, :BifurcationKit)
     include("test_bifurcation.jl")

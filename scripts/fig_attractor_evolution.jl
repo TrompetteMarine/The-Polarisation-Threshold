@@ -341,7 +341,7 @@ println("   ✓ Phase portrait gallery saved")
 println("\n[2b/4] Generating nullcline flow visualization...")
 
 # Helper function: draw arrows along the cubic curve toward attractors
-function draw_nullcline_flow_arrows_makie!(ax, κ, nf; n_arrows=6)
+function draw_nullcline_flow_arrows_makie!(ax, κ, nf; n_arrows=3)
     # Get equilibria and identify stable ones
     eq_list = equilibria(κ, nf)
     stable_eq = filter(a -> stability(a, κ, nf), eq_list)
@@ -477,29 +477,6 @@ if CAIRO_AVAILABLE
             end
         end
 
-        # Add legend only to last panel (post-bifurcation with two attractors)
-        if idx == 6
-            lines!(ax, [NaN], [NaN], color = (:steelblue, 0.8), linewidth = 3.5,
-                  label = "Nullcline ȧ = f(a)")
-            scatter!(ax, [NaN], [NaN], markersize = 18, color = :red,
-                    strokewidth = 2, strokecolor = :darkred,
-                    label = "Stable equilibrium")
-            scatter!(ax, [NaN], [NaN], markersize = 18, color = :white,
-                    strokewidth = 3, strokecolor = :black,
-                    label = "Unstable equilibrium")
-            # Show color-coded flow arrows
-            arrows!(ax, [NaN], [NaN], [0.3], [0.1],
-                   linewidth = 4.0, color = (:dodgerblue, 0.9),
-                   lengthscale = 1.0, arrowsize = 15,
-                   label = "Flow → negative attractor")
-            arrows!(ax, [NaN], [NaN], [0.3], [0.1],
-                   linewidth = 4.0, color = (:orangered, 0.9),
-                   lengthscale = 1.0, arrowsize = 15,
-                   label = "Flow → positive attractor")
-            axislegend(ax, position = :lt, framevisible = true,
-                      labelsize = 10, backgroundcolor = (:white, 0.9))
-        end
-
         xlims!(ax, -3.2, 3.2)
         ylims!(ax, -2.5, 2.5)
     end
@@ -507,6 +484,46 @@ if CAIRO_AVAILABLE
     # Add spacing between subplots
     colgap!(fig_nullcline.layout, 25)
     rowgap!(fig_nullcline.layout, 35)
+
+    # Create global legend outside all panels
+    # Use a dummy axis to create legend elements
+    leg_ax = Axis(fig_nullcline[3, 1:3],
+                 width = Relative(1.0),
+                 height = 30,
+                 valign = :top)
+    hidedecorations!(leg_ax)
+    hidespines!(leg_ax)
+
+    # Add invisible legend elements with proper colors
+    lines!(leg_ax, [NaN], [NaN], color = (:steelblue, 0.8), linewidth = 3.5,
+          label = "Nullcline ȧ = f(a)")
+    scatter!(leg_ax, [NaN], [NaN], markersize = 18, color = :red,
+            marker = :circle, strokewidth = 2, strokecolor = :darkred,
+            label = "Stable equilibrium")
+    scatter!(leg_ax, [NaN], [NaN], markersize = 18, color = :white,
+            marker = :circle, strokewidth = 3, strokecolor = :black,
+            label = "Unstable equilibrium")
+    arrows!(leg_ax, [NaN], [NaN], [0.3], [0.1],
+           linewidth = 4.0, color = (:dodgerblue, 0.9),
+           lengthscale = 1.0, arrowsize = 15,
+           label = "Flow → negative attractor")
+    arrows!(leg_ax, [NaN], [NaN], [0.3], [0.1],
+           linewidth = 4.0, color = (:orangered, 0.9),
+           lengthscale = 1.0, arrowsize = 15,
+           label = "Flow → positive attractor")
+
+    # Create horizontal legend at the bottom
+    Legend(fig_nullcline[3, 1:3], leg_ax,
+           orientation = :horizontal,
+           tellwidth = false,
+           tellheight = true,
+           halign = :center,
+           valign = :top,
+           framevisible = true,
+           labelsize = 12,
+           nbanks = 2,
+           padding = (10, 10, 5, 5),
+           backgroundcolor = (:white, 0.95))
 
     save("figs/nullcline_flow_gallery.pdf", fig_nullcline)
     save("figs/nullcline_flow_gallery.png", fig_nullcline, px_per_unit=3)

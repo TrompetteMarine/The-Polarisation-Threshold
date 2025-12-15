@@ -179,7 +179,7 @@ A CairoMakie backend is required; the script exits early with guidance if unavai
 
 ### 6. Reproducing specialised figures
 
-- `scripts/make_phase_portraits.jl --kappas 0.8,1.0,1.2 --lims -3,3` generates publication-quality phase portraits.
+- `scripts/make_phase_portraits.jl --kappas 0.8,1.0,1.2 --lims -3,3` generates phase portraits.
 - `scripts/scan_hopf_and_cycles.jl` and `scripts/scan_homoclinic.jl` scan for Hopf and homoclinic bifurcations, respectively. Adjust command-line flags in each script (see the header comments) to match the scenarios discussed in the manuscript.
 
 ### 7. Reproducing the four core Julia figures
@@ -195,7 +195,155 @@ julia --project=. scripts/fig4_welfare.jl
 
 Each script sets its own seed for reproducibility and writes the corresponding `figs/fig*.pdf` file consumed by `jme4.tex`.
 
-### 8. Phylogenetic bifurcation diagrams
+### 8. Extended welfare analysis (Figure 4 supplements)
+
+The welfare analysis includes a comprehensive suite of visualizations beyond the main Figure 4. Three specialized scripts generate various perspectives on the welfare landscape:
+
+#### Main welfare figures (`fig4_welfare.jl`)
+
+```bash
+julia --project=. scripts/fig4_welfare.jl
+```
+
+Generates the core Figure 4 materials:
+- **Main paper figure:** 1D welfare comparison showing κ^dec vs κ^soc (`fig4_welfare.pdf`)
+- **Enhanced 3-panel contour:** Decentralised, Planner, and Externality surfaces (`fig4_welfare_enhanced.pdf`)
+- **Individual panels:** Separate files for each contour panel (`fig4_panel_decentralised.pdf`, `fig4_panel_planner.pdf`, `fig4_panel_difference.pdf`)
+- **Cross-sections:** Welfare slices at different V* levels (`fig4_welfare_crosssections.pdf`, plus individual `fig4_slice_low/mid/high_dispersion.pdf`)
+- **Optimal comparison:** Ridge lines κ^dec(V*) vs κ^soc(V*) with shaded externality wedge (`fig4_welfare_optimal_comparison.pdf`)
+
+**Key features:**
+- Augmented axis ranges (6-8% padding) for better readability
+- Consistent color limits using robust quantile-based clipping
+- Power-law level spacing (x^0.6) to emphasize low-welfare regions
+- Both combined multi-panel and individual panel outputs for journal flexibility
+
+#### Supplementary welfare plots (`fig4_extra_plots.jl`)
+
+```bash
+julia --project=. scripts/fig4_extra_plots.jl
+```
+
+Generates supplementary figures for the online appendix and presentations:
+- **Externality ridge:** Δκ(V*) wedge showing the optimal policy gap (`fig4_externality_ridge.pdf`)
+- **Welfare difference surfaces:** 2-panel ΔW visualization with and without ridge overlays (`fig4_welfare_difference_surface.pdf`, plus individual panels)
+- **Complementary slices:** W(V* | κ) cross-sections at fixed coupling (`fig4_welfare_slices_kappa.pdf`, plus individual `fig4_slice_low/mid/high_kappa.pdf`)
+- **Pedagogical contours:** Annotated surfaces with "Safe plateau", "Welfare crater", and "Danger zone" labels for teaching (`fig4_pedagogical_contour.pdf`, plus individual panels)
+- **Labeled contours:** Inspired by CairoMakie's labeled contour example, showing exact welfare values with nonlinear level spacing (`fig4_labeled_contours.pdf`, plus individual `fig4_panel_labeled_*.pdf`)
+
+**Advanced features:**
+- Symmetric logarithmic spacing for difference plots (emphasizes near-zero structure)
+- Median-filtered ridge lines to remove argmax discontinuities
+- Debug mode (`DEBUG = true`) for surface diagnostics and slice validation
+
+#### Volcano-style surface explorer (`fig4_surface_explorer.jl`)
+
+```bash
+julia --project=. scripts/fig4_surface_explorer.jl
+```
+
+Generates clean topographic-style visualizations inspired by the volcano contour example:
+- **Multiple colorschemes:** terrain (topographic), thermal (heat map), deep (ocean), dense (high-contrast)
+- **Clean aesthetics:** Pure filled contours with integrated colorbars (no overlay lines)
+- **Individual surfaces:** Decentralised and Planner welfare with various color palettes
+- **Combined comparison:** 2×2 grid showing different colorscheme views (`combined_colorschemes.pdf`)
+
+All volcano-style outputs saved to: `figs/volcano/`
+
+**Design philosophy:**
+- Emphasizes "landscape" metaphor (welfare as elevation/temperature)
+- Higher resolution (80×20 grid) for ultra-smooth contours
+- Explicit colorbar legends showing exact welfare-to-color mapping
+- Simpler, more intuitive for non-specialist audiences
+
+#### Output organization
+
+All welfare scripts save both PDF and PNG formats for maximum compatibility:
+
+```
+figs/
+├── fig4_welfare.pdf                           # Main paper (1D)
+├── fig4_welfare_enhanced.pdf                  # 3-panel contour (main)
+├── fig4_panel_*.pdf                           # Individual panels (all types)
+├── fig4_slice_*.pdf                           # Cross-section slices
+├── fig4_*_ridge.pdf                           # Ridge/wedge comparisons
+├── fig4_labeled_contours.pdf                  # Nonlinear level spacing
+├── fig4_pedagogical_contour.pdf               # Annotated for teaching
+└── volcano/
+    ├── decentralised_terrain.pdf              # Volcano-style surfaces
+    ├── planner_*.pdf                          # Various colorschemes
+    ├── difference_balance.pdf                 # Symmetric difference
+    └── combined_colorschemes.pdf              # 2×2 comparison grid
+```
+
+**Configuration:**
+- Set `DEBUG = true` at the top of each script for detailed diagnostics
+- Modify grid resolution by editing `build_grids()` function
+- Adjust color limits via `finite_clims()` quantile parameters
+- Customize power-law exponents in `compute_powerlaw_levels()`
+
+#### Bifurcation-based welfare contours (`run_welfare_contours.jl`)
+
+```bash
+julia --project=. scripts/run_welfare_contours.jl
+# or, equivalently:
+julia --project=. scripts/run_welfare_corrected.jl
+```
+
+This script now follows the Section 6 mean-field-control split:
+- **Private loss** \(J_{\text{ind}}(θ,c₀) = α_V·V^* + K/θ^2\) (no polarisation term)
+- **Planner loss** \(J_{\text{soc}} = J_{\text{ind}} + Φ(V^*)\) where \(Φ\) is the bifurcation externality built from \(\kappa^*(V^*)\), \(λ̇₁₀(V^*)\), and the cubic normal form.
+
+**Core functions (in `src/OUResets.jl`):**
+
+1. **`compute_stationary_variance(theta, c0, params)`** — Monte Carlo estimate of \(V^*(θ,c₀)\).
+2. **`compute_lambda1_and_derivative(V, params)`** — leading odd eigenvalue \(λ₁₀\) and slope \(λ̇₁₀\); gives κ*(V).
+3. **`compute_b_cubic(V, params)`** — calibrated cubic coefficient \(b(V)\) (placeholder).
+4. **`private_cost(V, theta; αV, K_reset)`** — decentralised objective \(J_{\text{ind}}\).
+5. **`bifurcation_loss(V, params; ...)`** — externality \(Φ(V) = c_{\text{pol}}E[a^2] + φ_A E[a^4]\) with optional cached eigenvalues and a tracked fallback proxy when the spectral routine fails.
+6. **`welfare_loss(V, theta, params; regime=:dec|:soc, ...)`** — thin wrapper that returns \(J_{\text{ind}}\) or \(J_{\text{ind}} + Φ\).
+
+**Generated outputs:**
+
+- **`figs/fig_welfare_contours_corrected.pdf`**: 3-panel contour plot
+  - Decentralised welfare L_dec(θ, c₀)
+  - Social planner welfare L_soc(θ, c₀) = L_dec + Φ(V*)
+  - Externality surface Φ(V*)
+  - Overlaid optimal policies marked with stars
+
+- **`outputs/welfare_corrected.csv`**: Complete grid data
+  - Columns: theta, c0, V, L_dec, L_soc, Phi, lambda10, lambda1_dot, kappa_star
+  - One row per grid point for further analysis in R/Python/Matlab
+
+**Theory:**
+
+The welfare loss captures the cost of polarisation arising from social coupling κ exceeding the bifurcation threshold κ*(V). Unlike the simple simulation-based welfare in `fig4_welfare.jl` (which uses amplitude² and dispersion costs), this approach:
+
+- Derives welfare from the **spectral gap** of the linearised generator
+- Incorporates the **normal form bifurcation structure** (pitchfork with cubic coefficient b)
+- Explicitly models the **distribution of coupling intensities** conditional on V
+- Provides a **rigorous connection** between micro-level dynamics and aggregate welfare
+
+**Testing:**
+
+Verify the implementation with:
+```bash
+julia --project=. scripts/test_welfare_functions.jl
+```
+
+This runs diagnostics on all four core functions and sweeps L(V) over a range of dispersion levels.
+
+**Configuration:**
+
+Edit the following constants at the top of `run_welfare_contours.jl`:
+- `αV`, `K_reset`: Private-cost weights
+- `c_pol`, `φA`, `κ_ratio_max`: Externality weights and κ-range for Φ
+- `N_THETA`, `N_C0`: Grid resolution (default 25×25)
+- `THETA_MIN/MAX`, `C0_MIN/MAX`: Parameter ranges
+- `N_AGENTS`, `T_SIM`: Simulation budget for variance estimation
+- `L_SPECTRAL`, `M_SPECTRAL`: Spectral solver domain and grid points
+
+### 9. Phylogenetic bifurcation diagrams
 
 The repository includes advanced tools for generating "phylogenetic tree" bifurcation diagrams that show the complete attractor structure as κ sweeps through the critical threshold. These diagrams are analogous to the classic logistic map bifurcation diagrams but with the clean supercritical pitchfork structure of this model.
 
@@ -208,7 +356,7 @@ This script:
 - Calibrates the reduced normal form from micro-level parameters
 - Performs a dense parameter sweep (500 κ points, 30 initial conditions each)
 - Classifies equilibria as stable or unstable
-- Generates a publication-quality "tuning fork" diagram with theoretical envelope
+- Generates a "tuning fork" diagram with theoretical envelope
 - Includes an inset verifying the β = 0.5 scaling exponent
 
 **Attractor evolution gallery:**
@@ -251,7 +399,7 @@ using .PhylogeneticDiagram
 
 **Requirements:**
 
-- CairoMakie is recommended for professional vector graphics output
+- CairoMakie is recommended for vector graphics output
 - Falls back to Plots.jl if CairoMakie is unavailable
 - All core functionality works with the base BeliefSim installation
 
@@ -311,7 +459,7 @@ outputs/
 ## Extended analyses and optional tools
 
 - **Network coupling experiments:** `examples/network_demo.jl` shows how to couple agents on Graphs.jl networks via `src/Network.jl`.
-- **Custom plotting:** `scripts/plot_bifurcation.jl` converts stored CSV results into publication-ready figures using CairoMakie.
+- **Custom plotting:** `scripts/plot_bifurcation.jl` converts stored CSV results into figures using CairoMakie.
 - **BifurcationKit integration:** The project ships with lightweight continuation routines in `src/bifurcation/`. When BifurcationKit is available, additional continuation scripts (`scripts/scan_hopf_and_cycles_bifkit.jl`, `scripts/scan_homoclinic_BifKIt.jl`) can be run for cross-validation against the internal toolkit.
 
 All optional paths degrade gracefully: the scripts detect missing packages, provide installation hints, and fall back to the built-in solvers or plotting backends.
@@ -352,7 +500,7 @@ Consult the documents in `docs/` for detailed remediation steps:
 
 Happy replicating!
 
-## Reproducing the JME3 editor-requested figures
+## Reproducing the other figures of the paper
 
 Each script saves a PDF under `figs/` (created automatically). Run them from the
 repository root with the project activated:
@@ -368,4 +516,3 @@ julia --project=. scripts/fig4_welfare.jl
 - **Figure 2:** Leading odd eigenvalue \(\lambda_1(\kappa)\) highlighting the zero crossing \(\kappa^*\).
 - **Figure 3:** Pitchfork bifurcation of the order parameter with symmetric branches from biased simulations.
 - **Figure 4:** Welfare comparison between decentralised and planner solutions, marking \(\kappa^{\text{dec}}\) and \(\kappa^{\text{soc}}\).
-

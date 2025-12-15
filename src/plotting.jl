@@ -1,6 +1,6 @@
 module Plotting
 
-using Plots, FFTW, Statistics
+using Plots, FFTW, Statistics, LaTeXStrings
 using ..Types: KappaSweepResult, Params
 
 export plot_bifurcation, plot_vector_field, plot_orbit, plot_phase_diagram
