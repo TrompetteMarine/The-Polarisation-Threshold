@@ -6,6 +6,8 @@ Manifest.toml
 
 # Output directories
 figs/*.png
+figs/
+outputs/
 figs/*.pdf
 outputs/*.png
 outputs/*.csv
