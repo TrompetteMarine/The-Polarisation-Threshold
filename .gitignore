@@ -8,6 +8,7 @@ Manifest.toml
 figs/*.png
 figs/
 outputs/
+outputs/example_pitchfork/
 figs/*.pdf
 outputs/*.png
 outputs/*.csv
