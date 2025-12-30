@@ -11,12 +11,12 @@ Figure 2: leading odd eigenvalue λ₁(κ) for the linearised generator.
 function main()
     Random.seed!(25)
 
-    p = Params(λ=0.65, σ=1.15, Θ=0.87, c0=0.50, hazard=StepHazard(0.5))
-    κgrid = collect(range(0.0, 2.2, length=40))
+    p = Params(λ=0.85, σ=0.80, Θ=2.00, c0=0.80, hazard=StepHazard(10.5))
+    κgrid = collect(range(0.0, 12.2, length=400))
     λ1 = similar(κgrid)
 
     for (i, κ) in enumerate(κgrid)
-        λ1[i], _ = leading_odd_eigenvalue(p; κ=κ, L=5.0, M=301)
+        λ1[i], _ = leading_odd_eigenvalue(p; κ=κ, L=10.0, M=601)
     end
 
     # Locate κ* where λ₁ crosses zero via linear interpolation

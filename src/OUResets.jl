@@ -116,7 +116,8 @@ Returns `(centers, probs)` where:
   - `probs` are the normalised bin masses (sum(probs) = 1).
 
 Note: this is a discrete approximation to the stationary law, not a continuous
-density. It is suitable for plotting and moment estimation.
+density. It is suitable for plotting and moment estimation. Larger T yields
+more stable histograms; consider T=600 for smoother density plots.
 """
 function stationary_density(p::Params;
                             κ::Float64 = 0.0,
@@ -149,7 +150,8 @@ end
 # ----------------------------------------------------------------------
 
 """
-    leading_odd_eigenvalue(p; κ; L=5.0, M=401, corr_tol=1e-3)
+    leading_odd_eigenvalue(p; κ; L=5.0, M=401, corr_tol=1e-3,
+                           return_diag=false, return_mats=false, return_ops=false)
 
 Construct a finite-difference approximation of the *forward* generator
 for the linearised Fokker–Planck operator with resets, on a symmetric
@@ -169,7 +171,10 @@ function leading_odd_eigenvalue(p::Params;
                                 κ::Float64,
                                 L::Float64 = 5.0,
                                 M::Int     = 401,
-                                corr_tol::Float64 = 1e-3)
+                                corr_tol::Float64 = 1e-3,
+                                return_diag::Bool = false,
+                                return_mats::Bool = false,
+                                return_ops::Bool = false)
 
     @assert M ≥ 3 "Need at least 3 grid points"
     @assert isodd(M) "M should be odd so that x=0 is included in the grid"
@@ -220,9 +225,12 @@ function leading_odd_eigenvalue(p::Params;
     #  - subtract ν_j ρ_j from row j (sink),
     #  - add ν_j ρ_j (scaled) into row i_dest, where x_i_dest ≈ c0*y_j.
     #
+    jump_rates = zeros(Float64, M)
+    jump_loss_diag = zeros(Float64, M)
     @inbounds for j in 2:(M - 1)
         y   = x[j]                         # source location
         rate = ν(p.hazard, y, p.Θ)        # hazard at y
+        jump_rates[j] = rate
 
         if rate <= 0.0
             continue
@@ -230,6 +238,7 @@ function leading_odd_eigenvalue(p::Params;
 
         # Loss at source y:  -rate * ρ_j
         A[j, j] += -rate
+        jump_loss_diag[j] += -rate
 
         # Destination of reset: x = c0 * y
         x_dest = p.c0 * y
@@ -277,8 +286,57 @@ function leading_odd_eigenvalue(p::Params;
     real_vals = real.(vals[idxs])
     kmax      = idxs[argmax(real_vals)]
 
-    λ_odd = real(vals[kmax])
-    return λ_odd, x
+    eigval = vals[kmax]
+    v = vecs[:, kmax]
+    λ_odd = real(eigval)
+
+    if !return_diag
+        return λ_odd, x
+    end
+
+    nu0_expected = NaN
+    if hasproperty(p.hazard, :ν0)
+        nu0_expected = getproperty(p.hazard, :ν0)
+    elseif hasproperty(p.hazard, :nu0)
+        nu0_expected = getproperty(p.hazard, :nu0)
+    end
+    nu0_used = maximum(jump_rates)
+    jump_coeff_summary = (minimum(jump_rates), maximum(jump_rates))
+
+    idx_out = findall(i -> (i > 1) && (i < M) && (abs(x[i]) >= p.Θ) && (jump_rates[i] > 0), eachindex(x))
+    u_sample = isempty(idx_out) ? x[end - 1] : x[idx_out[1]]
+    nu_sample = ν(p.hazard, u_sample, p.Θ)
+    nu_grid_sample = (u_sample, nu_sample)
+
+    A_jump_diag_sample = Tuple{Float64, Float64}[]
+    if !isempty(idx_out)
+        mid = idx_out[cld(length(idx_out), 2)]
+        for i in unique([idx_out[1], mid, idx_out[end]])
+            push!(A_jump_diag_sample, (x[i], jump_loss_diag[i]))
+        end
+    end
+
+    # Dense eigen-decomposition always returns a full spectrum; mark as converged.
+    solver_resid = norm(A * v - eigval * v) / max(norm(v), eps())
+    diag = (
+        converged = isfinite(real(eigval)) && isfinite(imag(eigval)),
+        niter = 0,
+        info = :dense_eigen,
+        solver_resid = solver_resid,
+        eigval = eigval,
+        x = v,
+        xgrid = x,
+        nu0_expected = nu0_expected,
+        nu0_used = nu0_used,
+        nu_grid_sample = nu_grid_sample,
+        jump_coeff_summary = jump_coeff_summary,
+        A_jump_diag_sample = A_jump_diag_sample,
+        A = return_mats ? A : nothing,
+        Mmat = return_mats ? I : nothing,
+        apply_A = return_ops ? (u -> A * u) : nothing,
+        apply_M = return_ops ? (u -> u) : nothing
+    )
+    return λ_odd, diag
 end
 
 # ----------------------------------------------------------------------

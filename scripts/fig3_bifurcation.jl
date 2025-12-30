@@ -12,9 +12,9 @@ Figure 3: bifurcation diagram for the stationary order parameter a*(κ).
 function main()
     Random.seed!(2025)
 
-    p = Params(λ=1.0, σ=0.8, Θ=2.0, c0=0.5, hazard=StepHazard(0.6))
+    p = Params(λ=0.85, σ=0.8, Θ=2.0, c0=0.8, hazard=StepHazard(10.6))
     κstar = critical_kappa(p; N=15_000, T=350.0, dt=0.01, burn_in=120.0, seed=11)
-    κmax = 1.6 * κstar
+    κmax = 5 * κstar
     # Increased resolution for smoother bifurcation curves (24→50 points)
     κgrid = collect(range(0.0, κmax, length=50))
 

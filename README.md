@@ -124,8 +124,8 @@ All commands below assume the repository root as the working directory and that 
 using BeliefSim
 using BeliefSim.Types, BeliefSim.Stats, BeliefSim.Plotting
 
-p = Params(λ=1.0, σ=0.8, Θ=2.0, c0=0.5, hazard=StepHazard(0.5))
-Vstar = estimate_Vstar(p; N=20_000, T=300.0, dt=0.01, burn_in=100.0, seed=123)
+p = Params(λ=0.85, σ=0.8, Θ=2.0, c0=0.85, hazard=StepHazard(10.5))
+Vstar = estimate_Vstar(p; N=20_000, T=600.0, dt=0.01, burn_in=100.0, seed=123)
 κstar = critical_kappa(p; Vstar=Vstar)              # canonical shortcut g ≈ λ
 κgrid = collect(range(0.0, 2.0*κstar, length=21))
 res = sweep_kappa(p, κgrid; N=20_000, T=300.0, dt=0.01, burn_in=100.0, seed=42)
