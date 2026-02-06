@@ -9,9 +9,45 @@ echo "  BeliefSim.jl Environment Setup"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 
+# Function to install Julia using juliaup
+install_julia() {
+    echo "📥 Julia not found. Installing Julia via juliaup..."
+    echo ""
+    
+    if [[ "$OSTYPE" == "linux-gnu"* ]] || [[ "$OSTYPE" == "darwin"* ]]; then
+        # Linux or macOS
+        echo "  → Downloading and installing juliaup..."
+        curl -fsSL https://install.julialang.org | sh -s -- --yes
+        
+        # Source the juliaup environment
+        export PATH="$HOME/.juliaup/bin:$PATH"
+        
+    elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ "$OSTYPE" == "win32" ]]; then
+        # Windows
+        echo "❌ Error: Automatic installation on Windows requires manual setup" >&2
+        echo "Please install Julia from: https://julialang.org/downloads/" >&2
+        echo "Or install juliaup from: https://github.com/JuliaLang/juliaup" >&2
+        exit 1
+    else
+        echo "❌ Error: Unsupported operating system: $OSTYPE" >&2
+        exit 1
+    fi
+    
+    # Verify installation
+    if ! command -v julia >/dev/null 2>&1; then
+        echo "❌ Error: Julia installation failed" >&2
+        echo "Please restart your terminal and run this script again," >&2
+        echo "or install Julia manually from: https://julialang.org/downloads/" >&2
+        exit 1
+    fi
+    
+    echo "  ✓ Julia installed successfully!"
+    echo ""
+}
+
+# Check if Julia is installed
 if ! command -v julia >/dev/null 2>&1; then
-    echo "❌ Error: Julia is not installed" >&2
-    exit 1
+    install_julia
 fi
 
 echo "✓ Found Julia $(julia --version)"
