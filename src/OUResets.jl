@@ -151,6 +151,10 @@ end
 
 """
     leading_odd_eigenvalue(p; κ; L=5.0, M=401, corr_tol=1e-3,
+                           boundary=:reflecting, boundary_damp=nothing,
+                           tol_odd=1e-6, odd_select=:parity,
+                           odd_tol=nothing,
+                           prev_vec=nothing, track=false, oddspace=false,
                            return_diag=false, return_mats=false, return_ops=false)
 
 Construct a finite-difference approximation of the *forward* generator
@@ -158,20 +162,30 @@ for the linearised Fokker–Planck operator with resets, on a symmetric
 grid `x ∈ [-L, L]` with `M` points. Then:
 
   1. Diagonalise the discretised operator `A`.
-  2. Identify eigenvectors that are sufficiently "odd" (high correlation
-     with the prototype odd vector x).
-  3. Among those, pick the eigenvalue with the largest real part.
+  2. Identify eigenvectors that are sufficiently odd using a parity
+     defect test (`odd_select=:parity`) or the legacy correlation test
+     (`odd_select=:corr`).
+  3. Optionally track the branch by overlap with `prev_vec` (`track=true`).
+
+If `oddspace=true`, a reduced odd-subspace operator is built on the
+positive half-grid, eliminating parity classification entirely.
 
 Returns `(λ_odd, xgrid)` where `λ_odd` is the **leading odd eigenvalue**
-(closest to zero from the left in Re(λ)), and `xgrid` is the grid.
-
-This is the quantity used to locate the critical κ* where λ_odd(κ*) = 0.
+(closest to zero from the left in Re(λ)), and `xgrid` is the full grid.
 """
 function leading_odd_eigenvalue(p::Params;
                                 κ::Float64,
                                 L::Float64 = 5.0,
                                 M::Int     = 401,
                                 corr_tol::Float64 = 1e-3,
+                                boundary::Symbol = :reflecting,
+                                boundary_damp::Union{Nothing, Float64} = nothing,
+                                tol_odd::Float64 = 1e-6,
+                                odd_select::Symbol = :parity,
+                                odd_tol::Union{Nothing, Float64} = nothing,
+                                prev_vec::Union{Nothing, AbstractVector} = nothing,
+                                track::Bool = false,
+                                oddspace::Bool = false,
                                 return_diag::Bool = false,
                                 return_mats::Bool = false,
                                 return_ops::Bool = false)
@@ -182,6 +196,8 @@ function leading_odd_eigenvalue(p::Params;
     # Symmetric grid
     x = collect(range(-L, L, length = M))
     h = x[2] - x[1]
+
+    odd_tol_val = odd_tol === nothing ? tol_odd : odd_tol
 
     # Diffusion coefficient in forward operator: (σ^2 / 2) ∂_xx
     σ2 = p.σ^2 / 2
@@ -208,9 +224,36 @@ function leading_odd_eigenvalue(p::Params;
         A[i, i + 1] += -drift / (2h)
     end
 
-    # Crude absorbing boundaries
-    A[1, 1] = -10.0
-    A[M, M] = -10.0
+    # Boundary handling for drift + diffusion.
+    if boundary == :reflecting
+        # Reflecting (zero-flux) boundary avoids artificial sink modes at truncation.
+        # Diffusion: Neumann (reflecting) boundary via ghost-point symmetry.
+        A[1, 1] += -2σ2 / h^2
+        A[1, 2] +=  2σ2 / h^2
+        A[M, M]     += -2σ2 / h^2
+        A[M, M - 1] +=  2σ2 / h^2
+
+        # Drift: one-sided flux for -∂x(b ρ).
+        drift_1 = (κ - p.λ) * x[1]
+        drift_2 = (κ - p.λ) * x[2]
+        A[1, 1] +=  drift_1 / h
+        A[1, 2] += -drift_2 / h
+
+        drift_M = (κ - p.λ) * x[M]
+        drift_Mm1 = (κ - p.λ) * x[M - 1]
+        A[M, M]     += -drift_M / h
+        A[M, M - 1] +=  drift_Mm1 / h
+    elseif boundary == :dirichlet
+        # Dirichlet: leave boundary rows at zero so nonzero eigenvalues enforce ρ=0.
+    else
+        error("Unknown boundary mode: $(boundary)")
+    end
+
+    # Optional legacy damping (use boundary=:dirichlet, boundary_damp=10.0 to reproduce old behavior).
+    if boundary_damp !== nothing
+        A[1, 1] += -boundary_damp
+        A[M, M] += -boundary_damp
+    end
 
     # -----------------------------
     # 2) JUMP / RESET PART (FORWARD)
@@ -262,37 +305,195 @@ function leading_odd_eigenvalue(p::Params;
     # -----------------------------
     # 3) EIGEN-DECOMPOSITION AND ODD MODE SELECTION
     # -----------------------------
-    eig  = eigen(A)
+    use_interior = (boundary == :dirichlet) && (boundary_damp === nothing)
+    A_base = use_interior ? A[2:M-1, 2:M-1] : A
+    x_base = use_interior ? x[2:M-1] : x
+
+    prev_base = nothing
+    if prev_vec !== nothing
+        if length(prev_vec) == M
+            prev_base = use_interior ? prev_vec[2:M-1] : prev_vec
+        elseif length(prev_vec) == size(A_base, 1)
+            prev_base = prev_vec
+        else
+            @warn "prev_vec length mismatch; disabling tracking" len_prev=length(prev_vec) expected=M or size(A_base, 1)
+        end
+    end
+    track_enabled = track && prev_base !== nothing
+
+    function parity_defect_odd(v)
+        denom = norm(v)
+        return denom == 0 ? NaN : norm(v .+ reverse(v)) / denom
+    end
+
+    function parity_defect_even(v)
+        denom = norm(v)
+        return denom == 0 ? NaN : norm(v .- reverse(v)) / denom
+    end
+
+    if oddspace
+        m_base = size(A_base, 1)
+        mid = (m_base + 1) ÷ 2
+        pos_idx = (mid + 1):m_base
+        npos = length(pos_idx)
+        A_odd = zeros(Float64, npos, npos)
+        @inbounds for (k, i_pos) in enumerate(pos_idx)
+            v_full = zeros(Float64, m_base)
+            i_neg = m_base + 1 - i_pos
+            v_full[i_pos] = 1.0
+            v_full[i_neg] = -1.0
+            y_full = A_base * v_full
+            A_odd[:, k] = y_full[pos_idx]
+        end
+        A_work = A_odd
+        x_work = x_base[pos_idx]
+        prev_compare = track_enabled ? prev_base[pos_idx] : nothing
+    else
+        A_work = A_base
+        x_work = x_base
+        prev_compare = track_enabled ? prev_base : nothing
+    end
+
+    if track_enabled && prev_compare !== nothing && norm(prev_compare) == 0
+        track_enabled = false
+        prev_compare = nothing
+    end
+
+    eig  = eigen(A_work)
     vals = eig.values
     vecs = eig.vectors
 
-    # Prototype odd vector: x itself (odd on symmetric grid)
-    x_vec = x ./ norm(x)
-
-    # Oddness weight: |<v, x_vec>|
-    weights = zeros(Float64, length(vals))
-    @inbounds for k in eachindex(vals)
-        v = vecs[:, k]
-        weights[k] = abs(real(dot(v, x_vec)))
+    idx_candidates = collect(1:length(vals))
+    odd_selection_fallback = false
+    if !oddspace
+        if odd_select == :parity
+            parity_odd = Vector{Float64}(undef, length(vals))
+            @inbounds for k in eachindex(vals)
+                parity_odd[k] = parity_defect_odd(vecs[:, k])
+            end
+            idx_candidates = findall(d -> isfinite(d) && d <= odd_tol_val, parity_odd)
+            if isempty(idx_candidates)
+                odd_selection_fallback = true
+                x_vec = x_work ./ norm(x_work)
+                weights = zeros(Float64, length(vals))
+                @inbounds for k in eachindex(vals)
+                    weights[k] = abs(real(dot(vecs[:, k], x_vec)))
+                end
+                idx_candidates = findall(w -> w > corr_tol, weights)
+                if isempty(idx_candidates)
+                    idx_candidates = collect(1:length(vals))
+                end
+            end
+        elseif odd_select == :corr
+            x_vec = x_work ./ norm(x_work)
+            weights = zeros(Float64, length(vals))
+            @inbounds for k in eachindex(vals)
+                weights[k] = abs(real(dot(vecs[:, k], x_vec)))
+            end
+            idx_candidates = findall(w -> w > corr_tol, weights)
+            if isempty(idx_candidates)
+                odd_selection_fallback = true
+                idx_candidates = collect(1:length(vals))
+            end
+        else
+            error("Unknown odd_select: $(odd_select)")
+        end
     end
 
-    # Only keep eigenvectors that are sufficiently odd
-    idxs = findall(w -> w > corr_tol, weights)
-    if isempty(idxs)
-        error("No sufficiently odd eigenvector found; max correlation = $(maximum(weights))")
+    overlap_prev = NaN
+    kmax = 0
+    if track_enabled && prev_compare !== nothing
+        prev_norm = norm(prev_compare)
+        overlaps = fill(-Inf, length(idx_candidates))
+        if prev_norm > 0
+            @inbounds for (j, k) in enumerate(idx_candidates)
+                vk = vecs[:, k]
+                denom = norm(vk) * prev_norm
+                overlaps[j] = denom > 0 ? abs(dot(vk, prev_compare)) / denom : -Inf
+            end
+        end
+        if all(x -> !isfinite(x), overlaps)
+            track_enabled = false
+        else
+            order = sortperm(overlaps, rev = true)
+            k1 = idx_candidates[order[1]]
+            overlap_prev = overlaps[order[1]]
+            if length(order) >= 2 && isfinite(overlaps[order[2]]) &&
+               abs(overlaps[order[1]] - overlaps[order[2]]) < 1e-3
+                k2 = idx_candidates[order[2]]
+                if real(vals[k2]) > real(vals[k1])
+                    k1 = k2
+                    overlap_prev = overlaps[order[2]]
+                end
+            end
+            kmax = k1
+        end
     end
-
-    # Among odd-ish modes, pick eigenvalue with largest real part
-    real_vals = real.(vals[idxs])
-    kmax      = idxs[argmax(real_vals)]
+    if kmax == 0
+        real_vals = real.(vals[idx_candidates])
+        kmax = idx_candidates[argmax(real_vals)]
+    end
 
     eigval = vals[kmax]
-    v = vecs[:, kmax]
+    v_work = vecs[:, kmax]
+
+    if track_enabled && prev_compare !== nothing
+        s = real(dot(v_work, prev_compare))
+        if isfinite(s) && s != 0
+            v_work = v_work * sign(s)
+        end
+    end
+
+    residual = NaN
+
+    v_base = if oddspace
+        m_base = size(A_base, 1)
+        mid = (m_base + 1) ÷ 2
+        pos_idx = (mid + 1):m_base
+        v_full = zeros(eltype(v_work), m_base)
+        @inbounds for (k, i_pos) in enumerate(pos_idx)
+            i_neg = m_base + 1 - i_pos
+            v_full[i_pos] = v_work[k]
+            v_full[i_neg] = -v_work[k]
+        end
+        v_full
+    else
+        v_work
+    end
+
+    v = if use_interior
+        v_full = zeros(eltype(v_base), M)
+        v_full[2:M-1] .= v_base
+        v_full
+    else
+        v_base
+    end
     λ_odd = real(eigval)
 
     if !return_diag
         return λ_odd, x
     end
+
+    # Localization diagnostics (boundary and hazard regions).
+    denom = sum(abs2.(v))
+    if denom > 0
+        n = length(v)
+        k5 = max(1, Int(ceil(0.05 * n / 2)))
+        k1 = max(1, Int(ceil(0.01 * n / 2)))
+        idx5 = vcat(1:k5, (n - k5 + 1):n)
+        idx1 = vcat(1:k1, (n - k1 + 1):n)
+        boundary_mass_5pct = sum(abs2.(v[idx5])) / denom
+        boundary_mass_1pct = sum(abs2.(v[idx1])) / denom
+        idx_haz = findall(i -> abs(x[i]) >= p.Θ, eachindex(x))
+        hazard_mass = isempty(idx_haz) ? NaN : sum(abs2.(v[idx_haz])) / denom
+    else
+        boundary_mass_5pct = NaN
+        boundary_mass_1pct = NaN
+        hazard_mass = NaN
+    end
+
+    parity_defect_odd_full = parity_defect_odd(v)
+    parity_defect_even_full = parity_defect_even(v)
 
     nu0_expected = NaN
     if hasproperty(p.hazard, :ν0)
@@ -318,14 +519,29 @@ function leading_odd_eigenvalue(p::Params;
 
     # Dense eigen-decomposition always returns a full spectrum; mark as converged.
     solver_resid = norm(A * v - eigval * v) / max(norm(v), eps())
+    residual = solver_resid
+    row_sum_norm = norm(vec(sum(A, dims = 1)))
+    generator_mass_err = maximum(abs.(sum(A, dims = 1)))
     diag = (
         converged = isfinite(real(eigval)) && isfinite(imag(eigval)),
         niter = 0,
         info = :dense_eigen,
         solver_resid = solver_resid,
+        residual = residual,
         eigval = eigval,
+        lambda_odd = λ_odd,
+        v = v,
         x = v,
         xgrid = x,
+        boundary_mass_5pct = boundary_mass_5pct,
+        boundary_mass_1pct = boundary_mass_1pct,
+        hazard_mass = hazard_mass,
+        parity_defect_odd = parity_defect_odd_full,
+        parity_defect_even = parity_defect_even_full,
+        odd_selection_fallback = odd_selection_fallback,
+        overlap_prev = overlap_prev,
+        row_sum_norm = row_sum_norm,
+        generator_mass_err = generator_mass_err,
         nu0_expected = nu0_expected,
         nu0_used = nu0_used,
         nu_grid_sample = nu_grid_sample,

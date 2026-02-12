@@ -40,7 +40,7 @@ println("=" ^ 72)
 
 println("\n[1/4] Setting up parameters...")
 
-p = Params(λ=1.0, σ=0.8, Θ=2.0, c0=0.5, hazard=StepHazard(0.6))
+p = Params(λ=0.85, σ=1.15, Θ=2.0, c0=0.80, hazard=StepHazard(10.0))
 Vstar = estimate_Vstar(p; N=20_000, T=300.0, dt=0.01, burn_in=100.0, seed=2025)
 κstar = critical_kappa(p; N=20_000, T=350.0, dt=0.01, burn_in=120.0, seed=2026)
 
@@ -76,7 +76,7 @@ function integrate_trajectory(a0, κ, nf, T=50.0, dt=0.01)
 end
 
 # Helper function: draw phase-line arrows (CairoMakie version)
-function draw_phase_line_arrows_makie!(ax, κ, nf; x_min=-3.0, x_max=3.0, n_per_segment=5)
+function draw_phase_line_arrows_makie!(ax, κ, nf; x_min=-5.0, x_max=5.0, n_per_segment=5)
     # Get sorted equilibria
     eqs = sort(equilibria(κ, nf))
 
@@ -111,15 +111,15 @@ function draw_phase_line_arrows_makie!(ax, κ, nf; x_min=-3.0, x_max=3.0, n_per_
 
             # Draw prominent horizontal arrow near ȧ = 0
             arrows!(ax, [x - dx/2], [0.0], [dx], [0.0],
-                   linewidth = 2.5,
-                   color = (:steelblue, 0.85),
+                   linewidth = 3.5,
+                   color = (:steelblue, 0.9),
                    lengthscale = 1.0)
         end
     end
 end
 
 # Helper function: draw phase-line arrows (Plots.jl version)
-function draw_phase_line_arrows_plots!(plt, κ, nf; x_min=-3.0, x_max=3.0, n_per_segment=5)
+function draw_phase_line_arrows_plots!(plt, κ, nf; x_min=-5.0, x_max=5.0, n_per_segment=5)
     # Get sorted equilibria
     eqs = sort(equilibria(κ, nf))
 
@@ -168,7 +168,7 @@ end
 mkpath("figs")
 
 if CAIRO_AVAILABLE
-    fig = Figure(size=(1600, 1000), fontsize=13, backgroundcolor=:white)
+    fig = Figure(size=(2400, 1600), fontsize=18, backgroundcolor=:white)
 
     for (idx, (κ, ratio)) in enumerate(zip(κ_values, κ_ratios))
         row = div(idx - 1, 3) + 1
@@ -182,92 +182,100 @@ if CAIRO_AVAILABLE
                              ratio < 1.0 ? "(pre-bifurcation)" :
                              ratio ≈ 1.0 ? "(at threshold)" : "(post-bifurcation)"),
             aspect = DataAspect(),
-            xlabelsize = 13,
-            ylabelsize = 13,
-            titlesize = 14,
-            titlecolor = ratio < 1.0 ? :darkblue : (ratio > 1.05 ? :darkred : :black)
+            xlabelsize = 18,
+            ylabelsize = 18,
+            titlesize = 20,
+            titlecolor = ratio < 1.0 ? :dodgerblue : (ratio > 1.05 ? :crimson : :darkslategray),
+            xgridvisible = false,
+            ygridvisible = false,
+            backgroundcolor = (:gray95, 0.3)
         )
 
         # Nullcline ȧ = 0 (very subtle background reference)
-        a_grid = range(-3, 3, length=200)
+        a_grid = range(-5, 5, length=250)
         da_nullcline = [normal_form_rhs(a, κ, nf) for a in a_grid]
 
         lines!(ax, a_grid, da_nullcline,
-            color = (:gray80, 0.25), linewidth = 1.5, linestyle = :dot)
+            color = (:gray70, 0.4), linewidth = 3.0, linestyle = :dash)
 
         # Horizontal reference line at ȧ = 0
-        hlines!(ax, [0.0], color = (:black, 0.15), linewidth = 1.5)
+        hlines!(ax, [0.0], color = (:black, 0.25), linewidth = 3.0, linestyle = :solid)
 
         # Draw prominent phase-line arrows showing flow direction
-        draw_phase_line_arrows_makie!(ax, κ, nf; x_min=-3.0, x_max=3.0, n_per_segment=5)
+        draw_phase_line_arrows_makie!(ax, κ, nf; x_min=-3.5, x_max=3.5, n_per_segment=5)
 
         # Equilibria with clear visual distinction
         eq_list = equilibria(κ, nf)
         for a_eq in eq_list
             is_stable = stability(a_eq, κ, nf)
             if is_stable
-                # Stable: filled red circle
+                # Stable: filled circle with glow effect
                 scatter!(ax, [a_eq], [0.0],
-                    markersize = 16, color = :red,
-                    marker = :circle, strokewidth = 0)
-            else
-                # Unstable: hollow circle with thick black border
-                scatter!(ax, [a_eq], [0.0],
-                    markersize = 16, color = :white,
+                    markersize = 28, color = :crimson,
                     marker = :circle, strokewidth = 3,
+                    strokecolor = :darkred)
+            else
+                # Unstable: hollow circle with thick border
+                scatter!(ax, [a_eq], [0.0],
+                    markersize = 28, color = :white,
+                    marker = :circle, strokewidth = 4.5,
                     strokecolor = :black)
             end
         end
 
         # Sample trajectories from different ICs with better visibility
-        n_trajectories = 6
-        colors = [:steelblue, :purple, :teal, :orange, :brown, :pink]
+        n_trajectories = 8
+        colors = [:steelblue, :purple, :teal, :orange, :brown, :pink, :olive, :navy]
         for (traj_idx, _) in enumerate(1:n_trajectories)
             a0 = 5 * rand() - 2.5  # Random in [-2.5, 2.5]
             a_traj, da_traj = integrate_trajectory(a0, κ, nf, 40.0, 0.01)
 
             # Plot trajectory with moderate alpha
             lines!(ax, a_traj, da_traj,
-                color = (colors[traj_idx], 0.5), linewidth = 2.5)
+                color = (colors[traj_idx], 0.7), linewidth = 3.5)
 
             # Mark starting point (green) and ending point (attractor)
             scatter!(ax, [a_traj[1]], [da_traj[1]],
-                markersize = 7, color = :green, marker = :circle,
-                strokewidth = 1, strokecolor = :darkgreen)
+                markersize = 12, color = :green, marker = :circle,
+                strokewidth = 2.5, strokecolor = :darkgreen)
 
             # Mark ending point with arrow-like marker
             scatter!(ax, [a_traj[end]], [da_traj[end]],
-                markersize = 6, color = (colors[traj_idx], 0.8),
-                marker = :star5, strokewidth = 1, strokecolor = :black)
+                markersize = 11, color = (colors[traj_idx], 0.9),
+                marker = :star5, strokewidth = 2, strokecolor = :black)
         end
 
         # Add legend only to first panel
         if idx == 1
-            scatter!(ax, [NaN], [NaN], markersize = 16, color = :red,
+            scatter!(ax, [NaN], [NaN], markersize = 28, color = :crimson,
+                    strokewidth = 3, strokecolor = :darkred,
                     label = "Stable equilibrium")
-            scatter!(ax, [NaN], [NaN], markersize = 16, color = :white,
-                    strokewidth = 3, strokecolor = :black,
+            scatter!(ax, [NaN], [NaN], markersize = 28, color = :white,
+                    strokewidth = 4.5, strokecolor = :black,
                     label = "Unstable equilibrium")
-            scatter!(ax, [NaN], [NaN], markersize = 7, color = :green,
+            scatter!(ax, [NaN], [NaN], markersize = 12, color = :green,
+                    strokewidth = 2.5, strokecolor = :darkgreen,
                     label = "Initial condition")
-            # Add flow direction indicator to legend
-            arrows!(ax, [NaN], [NaN], [0.4], [0.0],
-                   linewidth = 2.5, color = (:steelblue, 0.85),
-                   lengthscale = 1.0, label = "Phase flow direction")
-            axislegend(ax, position = :lt, framevisible = true,
-                      labelsize = 11, backgroundcolor = (:white, 0.9))
+            axislegend(ax, position = :lt,
+                      framevisible = false,
+                      labelsize = 17,
+                      backgroundcolor = (:white, 0.98),
+                      patchsize = (0, 0),
+                      padding = (15, 15, 15, 15),
+                      rowgap = 10,
+                      margin = (10, 10, 10, 10))
         end
 
-        xlims!(ax, -3.2, 3.2)
-        ylims!(ax, -2.5, 2.5)
+        xlims!(ax, -4.0, 4.0)
+        ylims!(ax, -1.8, 1.8)
     end
 
     # Add spacing between subplots to prevent overlap
-    colgap!(fig.layout, 25)
-    rowgap!(fig.layout, 35)
+    colgap!(fig.layout, 40)
+    rowgap!(fig.layout, 50)
 
     save("figs/phase_portrait_gallery.pdf", fig)
-    save("figs/phase_portrait_gallery.png", fig, px_per_unit=3)
+    save("figs/phase_portrait_gallery.png", fig, px_per_unit=4)
 
 else
     # Fallback to Plots.jl
@@ -290,7 +298,7 @@ else
         )
 
         # Nullcline (very subtle background reference)
-        a_grid = range(-3, 3, length=200)
+        a_grid = range(-5, 5, length=200)
         da_nullcline = [normal_form_rhs(a, κ, nf) for a in a_grid]
         plot!(plt, a_grid, da_nullcline,
             color = :gray85, linewidth = 1.5, linestyle = :dot, alpha = 0.3, label = nothing)
@@ -367,7 +375,7 @@ function draw_nullcline_flow_arrows_makie!(ax, κ, nf; n_arrows=3)
 
     # Define regions between equilibria
     eqs_sorted = sort(eq_list)
-    boundaries = [-3.0, eqs_sorted..., 3.0]
+    boundaries = [-5.0, eqs_sorted..., 5.0]
 
     for i in 1:(length(boundaries) - 1)
         aL = boundaries[i]
@@ -417,16 +425,16 @@ function draw_nullcline_flow_arrows_makie!(ax, κ, nf; n_arrows=3)
 
             # Draw thick, salient arrow along the curve with color-coding
             arrows!(ax, [a], [da_dt], [arrow_da], [arrow_dda],
-                   linewidth = 4.0,
+                   linewidth = 5.0,
                    color = arrow_color,
                    lengthscale = 1.0,
-                   arrowsize = 15)
+                   arrowsize = 18)
         end
     end
 end
 
 if CAIRO_AVAILABLE
-    fig_nullcline = Figure(size=(1600, 1000), fontsize=13, backgroundcolor=:white)
+    fig_nullcline = Figure(size=(2400, 1600), fontsize=18, backgroundcolor=:white)
 
     for (idx, (κ, ratio)) in enumerate(zip(κ_values, κ_ratios))
         row = div(idx - 1, 3) + 1
@@ -439,21 +447,24 @@ if CAIRO_AVAILABLE
                              ratio < 1.0 ? "(pre-bifurcation)" :
                              ratio ≈ 1.0 ? "(at threshold)" : "(post-bifurcation)"),
             aspect = DataAspect(),
-            xlabelsize = 13,
-            ylabelsize = 13,
-            titlesize = 14,
-            titlecolor = ratio < 1.0 ? :darkblue : (ratio > 1.05 ? :darkred : :black)
+            xlabelsize = 18,
+            ylabelsize = 18,
+            titlesize = 20,
+            titlecolor = ratio < 1.0 ? :dodgerblue : (ratio > 1.05 ? :crimson : :darkslategray),
+            xgridvisible = false,
+            ygridvisible = false,
+            backgroundcolor = (:gray95, 0.3)
         )
 
         # Prominent nullcline curve
-        a_grid = range(-3, 3, length=300)
+        a_grid = range(-7, 7, length=400)
         da_nullcline = [normal_form_rhs(a, κ, nf) for a in a_grid]
 
         lines!(ax, a_grid, da_nullcline,
-            color = (:steelblue, 0.8), linewidth = 3.5, linestyle = :solid)
+            color = (:steelblue, 0.9), linewidth = 5.0, linestyle = :solid)
 
         # Horizontal reference line at ȧ = 0
-        hlines!(ax, [0.0], color = (:black, 0.3), linewidth = 1.5, linestyle = :dash)
+        hlines!(ax, [0.0], color = (:black, 0.4), linewidth = 3.0, linestyle = :dash)
 
         # Draw flow arrows along the cubic curve
         draw_nullcline_flow_arrows_makie!(ax, κ, nf)
@@ -463,54 +474,46 @@ if CAIRO_AVAILABLE
         for a_eq in eq_list
             is_stable = stability(a_eq, κ, nf)
             if is_stable
-                # Stable: filled red circle
+                # Stable: filled circle with enhanced styling
                 scatter!(ax, [a_eq], [0.0],
-                    markersize = 18, color = :red,
-                    marker = :circle, strokewidth = 2,
+                    markersize = 30, color = :crimson,
+                    marker = :circle, strokewidth = 4,
                     strokecolor = :darkred)
             else
-                # Unstable: hollow circle
+                # Unstable: hollow circle with thick border
                 scatter!(ax, [a_eq], [0.0],
-                    markersize = 18, color = :white,
-                    marker = :circle, strokewidth = 3,
+                    markersize = 30, color = :white,
+                    marker = :circle, strokewidth = 5,
                     strokecolor = :black)
             end
         end
 
-        xlims!(ax, -3.2, 3.2)
-        ylims!(ax, -2.5, 2.5)
+        xlims!(ax, -6.5, 6.5)
+        ylims!(ax, -3.5, 3.5)
     end
 
     # Add spacing between subplots
-    colgap!(fig_nullcline.layout, 25)
-    rowgap!(fig_nullcline.layout, 35)
+    colgap!(fig_nullcline.layout, 40)
+    rowgap!(fig_nullcline.layout, 60)
 
     # Create global legend outside all panels
     # Use a dummy axis to create legend elements
     leg_ax = Axis(fig_nullcline[3, 1:3],
                  width = Relative(1.0),
-                 height = 30,
-                 valign = :top)
+                 height = 60,
+                 valign = :bottom)
     hidedecorations!(leg_ax)
     hidespines!(leg_ax)
 
-    # Add invisible legend elements with proper colors
-    lines!(leg_ax, [NaN], [NaN], color = (:steelblue, 0.8), linewidth = 3.5,
+    # Add invisible legend elements with proper colors (without flow arrows)
+    lines!(leg_ax, [NaN], [NaN], color = (:steelblue, 0.9), linewidth = 5.0,
           label = "Nullcline ȧ = f(a)")
-    scatter!(leg_ax, [NaN], [NaN], markersize = 18, color = :red,
-            marker = :circle, strokewidth = 2, strokecolor = :darkred,
+    scatter!(leg_ax, [NaN], [NaN], markersize = 30, color = :crimson,
+            marker = :circle, strokewidth = 4, strokecolor = :darkred,
             label = "Stable equilibrium")
-    scatter!(leg_ax, [NaN], [NaN], markersize = 18, color = :white,
-            marker = :circle, strokewidth = 3, strokecolor = :black,
+    scatter!(leg_ax, [NaN], [NaN], markersize = 30, color = :white,
+            marker = :circle, strokewidth = 5, strokecolor = :black,
             label = "Unstable equilibrium")
-    arrows!(leg_ax, [NaN], [NaN], [0.3], [0.1],
-           linewidth = 4.0, color = (:dodgerblue, 0.9),
-           lengthscale = 1.0, arrowsize = 15,
-           label = "Flow → negative attractor")
-    arrows!(leg_ax, [NaN], [NaN], [0.3], [0.1],
-           linewidth = 4.0, color = (:orangered, 0.9),
-           lengthscale = 1.0, arrowsize = 15,
-           label = "Flow → positive attractor")
 
     # Create horizontal legend at the bottom
     Legend(fig_nullcline[3, 1:3], leg_ax,
@@ -518,15 +521,19 @@ if CAIRO_AVAILABLE
            tellwidth = false,
            tellheight = true,
            halign = :center,
-           valign = :top,
-           framevisible = true,
-           labelsize = 12,
-           nbanks = 2,
-           padding = (10, 10, 5, 5),
-           backgroundcolor = (:white, 0.95))
+           valign = :center,
+           framevisible = false,
+           labelsize = 18,
+           nbanks = 1,
+           padding = (20, 20, 20, 20),
+           patchsize = (0, 0),
+           colgap = 35,
+           rowgap = 15,
+           margin = (15, 15, 15, 15),
+           backgroundcolor = (:white, 0.98))
 
     save("figs/nullcline_flow_gallery.pdf", fig_nullcline)
-    save("figs/nullcline_flow_gallery.png", fig_nullcline, px_per_unit=3)
+    save("figs/nullcline_flow_gallery.png", fig_nullcline, px_per_unit=4)
 
     println("   ✓ Nullcline flow gallery saved")
 else
@@ -569,11 +576,11 @@ function compute_basin(κ, nf; a_grid_size=200, T_integrate=100.0, dt=0.01)
 end
 
 if CAIRO_AVAILABLE
-    fig_basin = Figure(size=(1500, 450), fontsize=14, backgroundcolor=:white)
+    fig_basin = Figure(size=(2400, 700), fontsize=18, backgroundcolor=:white)
 
     # Add overall title
     Label(fig_basin[0, :], "Basin of Attraction Evolution",
-          fontsize = 18, font = :bold, color = :black)
+          fontsize = 24, font = :bold, color = :darkslategray)
 
     for (idx, κ) in enumerate(κ_basin_values)
         ax = Axis(fig_basin[1, idx],
@@ -582,37 +589,42 @@ if CAIRO_AVAILABLE
             title = @sprintf("κ/κ* = %.2f %s", κ/κstar,
                             κ/κstar < 1.05 ? "(emerging split)" :
                             κ/κstar < 1.3 ? "(clear split)" : "(well-separated)"),
-            xlabelsize = 14,
-            ylabelsize = 14,
-            titlesize = 15,
-            titlecolor = κ/κstar < 1.1 ? :darkgreen : (κ/κstar < 1.3 ? :darkorange : :darkred),
-            xgridstyle = :dash,
-            ygridstyle = :dash,
-            xgridcolor = (:gray, 0.2),
-            ygridcolor = (:gray, 0.2)
+            xlabelsize = 18,
+            ylabelsize = 18,
+            titlesize = 20,
+            titlecolor = κ/κstar < 1.1 ? :seagreen : (κ/κstar < 1.3 ? :darkorange : :crimson),
+            xgridvisible = false,
+            ygridvisible = false,
+            backgroundcolor = (:gray95, 0.3)
         )
 
         a_grid, basin = compute_basin(κ, nf; a_grid_size=300)
 
         # Color code by basin with clearer colors
-        colors = [basin[i] == -1 ? (:blue, 0.7) :
-                  (basin[i] == 1 ? (:red, 0.7) : (:gray50, 0.5)) for i in eachindex(basin)]
+        colors = [basin[i] == -1 ? (:blue, 0.8) :
+                  (basin[i] == 1 ? (:red, 0.8) : (:gray50, 0.6)) for i in eachindex(basin)]
 
         scatter!(ax, a_grid, basin,
-            color = colors, markersize = 4, strokewidth = 0)
+            color = colors, markersize = 6, strokewidth = 0)
 
         # Add horizontal reference lines
-        hlines!(ax, [-1], color = :blue, linestyle = :solid, linewidth = 3,
+        hlines!(ax, [-1], color = :blue, linestyle = :solid, linewidth = 4,
                 label = "Negative polarization")
-        hlines!(ax, [0], color = :gray30, linestyle = :dash, linewidth = 2,
+        hlines!(ax, [0], color = :gray30, linestyle = :dash, linewidth = 3,
                 label = "Consensus (unstable)")
-        hlines!(ax, [1], color = :red, linestyle = :solid, linewidth = 3,
+        hlines!(ax, [1], color = :red, linestyle = :solid, linewidth = 4,
                 label = "Positive polarization")
 
         # Add legend only to first panel
         if idx == 1
-            axislegend(ax, position = :lt, framevisible = true,
-                      labelsize = 11, backgroundcolor = (:white, 0.9))
+            axislegend(ax, position = :lt,
+                      framevisible = false,
+                      labelsize = 18,
+                      backgroundcolor = (:white, 0.98),
+                      patchsize = (0, 0),
+                      padding = (18, 18, 18, 18),
+                      rowgap = 12,
+                      margin = (10, 10, 10, 10))
         end
 
         # Add annotations about basin sizes
@@ -623,11 +635,11 @@ if CAIRO_AVAILABLE
 
         text!(ax, 0, -1.35,
               text = @sprintf("%.1f%%", 100*n_neg/total),
-              fontsize = 12, align = (:center, :center),
+              fontsize = 16, align = (:center, :center),
               color = :blue, font = :bold)
         text!(ax, 0, 1.35,
               text = @sprintf("%.1f%%", 100*n_pos/total),
-              fontsize = 12, align = (:center, :center),
+              fontsize = 16, align = (:center, :center),
               color = :red, font = :bold)
 
         ylims!(ax, -1.6, 1.6)
@@ -635,10 +647,10 @@ if CAIRO_AVAILABLE
     end
 
     # Add spacing between panels
-    colgap!(fig_basin.layout, 30)
+    colgap!(fig_basin.layout, 50)
 
     save("figs/basin_evolution.pdf", fig_basin)
-    save("figs/basin_evolution.png", fig_basin, px_per_unit=3)
+    save("figs/basin_evolution.png", fig_basin, px_per_unit=4)
 
 else
     # Plots.jl fallback
@@ -709,58 +721,63 @@ traj_below = trajectory_panel(κ_below, nf, 10, 100.0, 0.01)
 traj_above = trajectory_panel(κ_above, nf, 10, 100.0, 0.01)
 
 if CAIRO_AVAILABLE
-    fig_traj = Figure(size=(1400, 600), fontsize=14, backgroundcolor=:white)
+    fig_traj = Figure(size=(2400, 900), fontsize=18, backgroundcolor=:white)
 
     # Left panel: Below threshold - all trajectories converge to consensus
     ax1 = Axis(fig_traj[1, 1],
         xlabel = "Time t",
         ylabel = "Amplitude a(t)",
         title = @sprintf("Below threshold: κ = %.3f (%.1f%% of κ*)", κ_below, 100*κ_below/κstar),
-        xlabelsize = 15,
-        ylabelsize = 15,
-        titlesize = 16,
-        titlecolor = :darkblue,
-        xgridstyle = :dash,
-        ygridstyle = :dash,
-        xgridcolor = (:gray, 0.3),
-        ygridcolor = (:gray, 0.3)
+        xlabelsize = 20,
+        ylabelsize = 20,
+        titlesize = 22,
+        titlecolor = :dodgerblue,
+        xgridvisible = false,
+        ygridvisible = false,
+        backgroundcolor = (:gray95, 0.3)
     )
 
     # Plot trajectories with distinct colors
     colors_traj = [:steelblue, :purple, :teal, :orange, :brown, :pink, :olive, :navy, :maroon, :cyan]
     for (idx, (t, a)) in enumerate(traj_below)
-        lines!(ax1, t, a, color = (colors_traj[idx], 0.7), linewidth = 2.5)
+        lines!(ax1, t, a, color = (colors_traj[idx], 0.75), linewidth = 3.5)
     end
 
     # Mark the single stable attractor (consensus at a=0)
-    hlines!(ax1, [0], color = :red, linewidth = 4, linestyle = :solid,
+    hlines!(ax1, [0], color = :crimson, linewidth = 5, linestyle = :solid,
             label = "Stable consensus (a = 0)")
 
     # Add shaded region showing basin of attraction (all initial conditions converge)
-    text!(ax1, 50, 2.3, text = "All trajectories\nconverge to\nconsensus",
-          fontsize = 13, align = (:center, :center),
+    text!(ax1, 50, 1.7, text = "All trajectories\nconverge to\nconsensus",
+          fontsize = 16, align = (:center, :center),
           color = :darkblue, font = :bold)
 
-    ylims!(ax1, -2.8, 2.8)
-    axislegend(ax1, position = :rt, framevisible = true, backgroundcolor = (:white, 0.9))
+    ylims!(ax1, -2.2, 2.2)
+    axislegend(ax1, position = :rt,
+              framevisible = false,
+              backgroundcolor = (:white, 0.98),
+              patchsize = (0, 0),
+              padding = (18, 18, 18, 18),
+              labelsize = 18,
+              rowgap = 12,
+              margin = (10, 10, 10, 10))
 
     # Right panel: Above threshold - trajectories split to ±a*
     ax2 = Axis(fig_traj[1, 2],
         xlabel = "Time t",
         ylabel = "Amplitude a(t)",
         title = @sprintf("Above threshold: κ = %.3f (%.1f%% of κ*)", κ_above, 100*κ_above/κstar),
-        xlabelsize = 15,
-        ylabelsize = 15,
-        titlesize = 16,
-        titlecolor = :darkred,
-        xgridstyle = :dash,
-        ygridstyle = :dash,
-        xgridcolor = (:gray, 0.3),
-        ygridcolor = (:gray, 0.3)
+        xlabelsize = 20,
+        ylabelsize = 20,
+        titlesize = 22,
+        titlecolor = :crimson,
+        xgridvisible = false,
+        ygridvisible = false,
+        backgroundcolor = (:gray95, 0.3)
     )
 
     for (idx, (t, a)) in enumerate(traj_above)
-        lines!(ax2, t, a, color = (colors_traj[idx], 0.7), linewidth = 2.5)
+        lines!(ax2, t, a, color = (colors_traj[idx], 0.75), linewidth = 3.5)
     end
 
     # Mark the stable attractors (polarized states at ±a*)
@@ -769,10 +786,10 @@ if CAIRO_AVAILABLE
 
     for a_eq in stable_eq
         if abs(a_eq) > 0.01  # Only mark non-zero attractors
-            hlines!(ax2, [a_eq], color = :red, linewidth = 4, linestyle = :solid)
+            hlines!(ax2, [a_eq], color = :crimson, linewidth = 5, linestyle = :solid)
         else
             # Mark unstable consensus
-            hlines!(ax2, [a_eq], color = :black, linewidth = 3, linestyle = :dash)
+            hlines!(ax2, [a_eq], color = :black, linewidth = 4, linestyle = :dash)
         end
     end
 
@@ -780,31 +797,31 @@ if CAIRO_AVAILABLE
     if length(stable_eq) > 1
         positive_attractor = maximum(stable_eq)
         negative_attractor = minimum(stable_eq)
-        text!(ax2, 50, positive_attractor + 0.4,
+        text!(ax2, 50, positive_attractor + 0.35,
               text = "Stable polarized\nstate (+)",
-              fontsize = 12, align = (:center, :center),
-              color = :darkred)
-        text!(ax2, 50, negative_attractor - 0.4,
+              fontsize = 16, align = (:center, :center),
+              color = :darkred, font = :bold)
+        text!(ax2, 50, negative_attractor - 0.35,
               text = "Stable polarized\nstate (−)",
-              fontsize = 12, align = (:center, :center),
-              color = :darkred)
+              fontsize = 16, align = (:center, :center),
+              color = :darkred, font = :bold)
         text!(ax2, 50, 0.3,
               text = "Unstable\nconsensus",
-              fontsize = 11, align = (:center, :bottom),
-              color = :gray30)
+              fontsize = 14, align = (:center, :bottom),
+              color = :gray30, font = :bold)
     end
 
-    ylims!(ax2, -2.8, 2.8)
+    ylims!(ax2, -2.2, 2.2)
 
     # Add overall title
     Label(fig_traj[0, :], "Trajectory Evolution: Consensus vs Polarization",
-          fontsize = 18, font = :bold, color = :black)
+          fontsize = 24, font = :bold, color = :darkslategray)
 
     # Add spacing between panels
-    colgap!(fig_traj.layout, 30)
+    colgap!(fig_traj.layout, 50)
 
     save("figs/trajectory_fates.pdf", fig_traj)
-    save("figs/trajectory_fates.png", fig_traj, px_per_unit=3)
+    save("figs/trajectory_fates.png", fig_traj, px_per_unit=4)
 
 else
     # Plots.jl fallback

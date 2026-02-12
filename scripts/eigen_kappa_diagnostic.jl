@@ -359,6 +359,7 @@ function main()
     # Summary rows: write as CSV at the end
     header = [
         "timestamp", "L", "M",
+        "du",
         "lambda_start", "lambda_end",
         "n_invalid_kappa", "n_fail", "min_lambda_eff",
         "n_crossings", "crossings",
@@ -380,6 +381,7 @@ function main()
 
             tag = @sprintf("L%0.1f_M%d", L, M)
             tag_clean = replace(tag, "." => "p")
+            du = 2 * L / (M - 1)
 
             nκ = length(κgrid)
             λ1 = fill(NaN, nκ)
@@ -508,6 +510,7 @@ function main()
                 push!(rows, Any[
                     string(Dates.now()),
                     L, M,
+                    du,
                     λ1[1], λ1[end],
                     n_invalid_kappa, n_fail, min_lambda_eff,
                     length(crossings), join(string.(crossings), "|"),
@@ -591,6 +594,7 @@ function main()
             push!(rows, Any[
                 string(Dates.now()),
                 L, M,
+                du,
                 λ1[1], λ1[end],
                 n_invalid_kappa, n_fail, min_lambda_eff,
                 length(crossings), join(string.(crossings), "|"),

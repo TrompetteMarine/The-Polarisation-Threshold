@@ -13,6 +13,7 @@ using Printf
 using Dates
 using CSV
 using DataFrames
+import ArgParse
 
 using BeliefSim
 using BeliefSim.Types
@@ -22,16 +23,15 @@ using BeliefSim.Stats
 CAIRO_AVAILABLE = false
 try
     using CairoMakie
-    CAIRO_AVAILABLE = true
+    global CAIRO_AVAILABLE = true
 catch
     @warn "CairoMakie not available, falling back to Plots.jl"
     using Plots
 end
 
-function parse_args()
-    using ArgParse
-    s = ArgParseSettings()
-    @add_arg_table s begin
+function parse_commandline()
+    s = ArgParse.ArgParseSettings()
+    ArgParse.@add_arg_table s begin
         "--lambda"; arg_type=Float64; default=0.85; help="Mean reversion λ"
         "--theta"; arg_type=Float64; default=2.0; help="Threshold Θ"
         "--nu0"; arg_type=Float64; default=10.6; help="Step hazard height ν0"
@@ -45,11 +45,11 @@ function parse_args()
         "--fast"; action=:store_true; help="Enable fast mode (smaller grid/precision)"
         "--with-vstar"; action=:store_true; help="Compute V* per grid point (expensive)"
     end
-    return parse_args(s)
+    return ArgParse.parse_args(s)
 end
 
 function main()
-    args = parse_args()
+    args = parse_commandline()
 
     fast_env = get(ENV, "FAST_MODE", "0") in ("1", "true", "yes", "on")
     fast = args["fast"] || fast_env
@@ -159,18 +159,23 @@ function main()
     end
 
     # Plot
+    if size(kstar_mat) != (length(σ_grid), length(c0_grid))
+        error("kstar_mat size mismatch: expected (length(σ_grid), length(c0_grid)) = ($(length(σ_grid)), $(length(c0_grid))), got $(size(kstar_mat))")
+    end
     if CAIRO_AVAILABLE
         fig = Figure(size=(900, 650), fontsize=14, backgroundcolor=:white)
-        ax = Axis(fig[1, 1], xlabel="c0", ylabel="σ", title="Critical coupling κ*(c0, σ)")
-        hm = heatmap!(ax, c0_grid, σ_grid, kstar_mat; colormap=:viridis)
-        contour!(ax, c0_grid, σ_grid, kstar_mat; levels=8, color=:black, linewidth=1.0)
+        ax = Axis(fig[1, 1], xlabel="c0", ylabel="η", title="Critical coupling κ*(c0, η)")
+        # Makie expects z to have size (length(x), length(y)); our kstar_mat is (y, x).
+        kstar_plot = permutedims(kstar_mat)
+        hm = heatmap!(ax, c0_grid, σ_grid, kstar_plot; colormap=:viridis)
+        contour!(ax, c0_grid, σ_grid, kstar_plot; levels=8, color=:black, linewidth=1.0)
         Colorbar(fig[1, 2], hm, label="κ*")
         fig_path = joinpath(figdir, "fig5_phase_kstar.pdf")
         save(fig_path, fig)
     else
         default(fontfamily="Computer Modern")
-        plt = heatmap(c0_grid, σ_grid, kstar_mat; xlabel="c0", ylabel="σ",
-                      title="Critical coupling κ*(c0, σ)", c=:viridis,
+        plt = heatmap(c0_grid, σ_grid, kstar_mat; xlabel="c0", ylabel="η",
+                      title="Critical coupling κ*(c0, η)", c=:viridis,
                       colorbar_title="κ*", size=(900, 650))
         contour!(plt, c0_grid, σ_grid, kstar_mat; levels=8, color=:black, linewidth=1.0)
         fig_path = joinpath(figdir, "fig5_phase_kstar.pdf")

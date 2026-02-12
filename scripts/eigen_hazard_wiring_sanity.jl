@@ -11,6 +11,7 @@
 using BeliefSim
 using BeliefSim.OUResets
 using BeliefSim.Types
+using BeliefSim.Hazard: ν
 using LinearAlgebra
 using Printf
 using Dates
@@ -67,6 +68,15 @@ function unpack_jump_samples(samples, n::Int)
     return uvals, jvals
 end
 
+function hazard_rate(h, u::Real, Θ::Real)
+    try
+        return ν(h, Float64(u), Float64(Θ))
+    catch err
+        @warn "hazard_rate failed" err typeof(h) u Θ
+        return NaN
+    end
+end
+
 # ----------------------------
 # Main
 # ----------------------------
@@ -97,12 +107,15 @@ function main()
             end
 
             if diag !== nothing
-                for jv in jvals
-                    if isfinite(jv) && isfinite(nu0_expected)
-                        if STRICT_ASSERT
-                            @assert abs(jv + nu0_expected) <= TOL
-                        elseif abs(jv + nu0_expected) > TOL
-                            @warn "jump-loss scaling mismatch" nu0_expected jv
+                for (u, jv) in zip(uvals, jvals)
+                    if isfinite(u) && isfinite(jv)
+                        target = -hazard_rate(p.hazard, u, p.Θ)
+                        if isfinite(target)
+                            if STRICT_ASSERT
+                                @assert abs(jv - target) <= TOL
+                            elseif abs(jv - target) > TOL
+                                @warn "jump-loss scaling mismatch" u target jv
+                            end
                         end
                     end
                 end

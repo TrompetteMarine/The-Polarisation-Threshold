@@ -14,8 +14,8 @@ function main()
     Random.seed!(2025)
 
     # Baseline parameters
-    p = Params(λ=0.85, σ=0.80, Θ=2.0, c0=0.80, hazard=StepHazard(10.6))
-    T = 600.0
+    p = Params(λ=0.85, σ=1.15, Θ=2.0, c0=0.80, hazard=StepHazard(10.0))
+    T = 300.0
     dt = 0.01
 
     # Simulate sample paths

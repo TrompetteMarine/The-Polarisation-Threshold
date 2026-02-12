@@ -14,12 +14,17 @@ This repository accompanies the manuscript on the polarisation threshold in Orns
 4. [Environment setup](#environment-setup)
 5. [Verifying the installation](#verifying-the-installation)
 6. [Reproducing the main results](#reproducing-the-main-results)
-7. [YAML configuration reference](#yaml-configuration-reference)
-8. [Output structure](#output-structure)
-9. [Extended analyses and optional tools](#extended-analyses-and-optional-tools)
-10. [Testing and quality assurance](#testing-and-quality-assurance)
-11. [Troubleshooting](#troubleshooting)
-12. [Support, contributions, and licence](#support-contributions-and-licence)
+7. [Model simulated in numerics](#model-simulated-in-numerics)
+8. [Interpreting symmetry](#interpreting-symmetry)
+9. [Reproducing figures](#reproducing-figures)
+10. [Outputs glossary](#outputs-glossary)
+11. [Sanity checks](#sanity-checks)
+12. [YAML configuration reference](#yaml-configuration-reference)
+13. [Output structure](#output-structure)
+14. [Extended analyses and optional tools](#extended-analyses-and-optional-tools)
+15. [Testing and quality assurance](#testing-and-quality-assurance)
+16. [Troubleshooting](#troubleshooting)
+17. [Support, contributions, and licence](#support-contributions-and-licence)
 
 ---
 
@@ -42,6 +47,7 @@ This repository accompanies the manuscript on the polarisation threshold in Orns
 | `env-nods/` | Alternative environment specification for systems without DynamicalSystems dependencies. |
 | `test/` | Unit tests for `BeliefSim.jl` and optional bifurcation checks. |
 | `Makefile` | Convenience targets for instantiation (`make instantiate`), testing (`make test`), and linting hooks. |
+| `scripts/generate_bifurcation_figures.jl` | Publication-quality figure generator driven by the ensemble sweep CSVs. |
 
 ---
 
@@ -50,7 +56,7 @@ This repository accompanies the manuscript on the polarisation threshold in Orns
 - **Julia:** 1.8, 1.9, 1.10, or 1.12 (LTS recommended: 1.10).
 - **Operating system:** Linux, macOS, or Windows with a working Julia installation.
 - **Git:** for cloning this repository.
-- **Optional packages:** CairoMakie (vector graphics), BifurcationKit (advanced continuation), Attractors/DynamicalSystems (basin sampling). The setup script installs these when available, and all core replications run without them.
+- **Optional packages:** CairoMakie (vector graphics), LaTeXStrings (math labels), BifurcationKit (advanced continuation), Attractors/DynamicalSystems (basin sampling). The setup script installs these when available, and all core replications run without them.
 
 ---
 
@@ -195,6 +201,19 @@ julia --project=. scripts/fig5_phase_kstar.jl
 julia --project=. scripts/fig6_density_snapshots.jl
 ```
 
+Optional (longer runtime): ensemble-validated Figure 6 with confidence intervals, growth-rate tests, and phase diagram.
+This run writes `outputs/parameter_sweep/*.csv`, which are consumed by the publication-quality figure generator below.
+
+```bash
+julia --project=. scripts/fig6_ensemble_enhanced.jl
+```
+
+Publication-quality bifurcation figures (post-processing of the ensemble sweep CSVs):
+
+```bash
+julia --project=. scripts/generate_bifurcation_figures.jl
+```
+
 Fig A (zoomed pitchfork around κ*) is generated via the YAML analysis pipeline:
 
 ```bash
@@ -205,7 +224,7 @@ Each script sets its own seed for reproducibility and writes the corresponding `
 
 Convenience Makefile targets:
 - `make fig5`
-- `make fig6`
+- `make fig6` (baseline single-run density snapshots)
 - `make figs_abc`
 
 ### 8. Extended welfare analysis (Figure 4 supplements)
@@ -284,12 +303,27 @@ figs/
 ├── fig4_pedagogical_contour.pdf               # Annotated for teaching
 ├── fig5_phase_kstar.pdf                       # κ*(c0, σ) phase diagram
 ├── fig6_density_snapshots.pdf                 # Density snapshots below/above κ*
+├── fig6_ensemble_enhanced.pdf                 # Ensemble-averaged density snapshots + CI
+├── fig6_phase_diagram.pdf                     # λ₁ vs κ/κ* phase diagram (ensemble)
+├── fig6_observables_comparison.pdf            # Variance/kurtosis/bimodality/overlap
+├── fig_bifurcation_diagram.pdf                # Publication-quality |a*| vs κ/κ*
+├── fig_loglog_scaling.pdf                     # Log-log scaling test (β)
+├── fig_hysteresis_test.pdf                    # Forward/backward sweep comparison
+├── fig_variance_ushape.pdf                    # Variance U-shape with V_min
+├── fig_density_evolution.pdf                  # Composite density evolution (if data saved)
+├── fig_validation_summary.pdf                 # 4-panel summary (talks/posters)
 └── volcano/
     ├── decentralised_terrain.pdf              # Volcano-style surfaces
     ├── planner_*.pdf                          # Various colorschemes
     ├── difference_balance.pdf                 # Symmetric difference
     └── combined_colorschemes.pdf              # 2×2 comparison grid
 ```
+
+Ensemble validation outputs (from `scripts/fig6_ensemble_enhanced.jl`) are written to:
+- `outputs/ensemble_results/` (ensemble growth rates, trajectories, observables)
+- `outputs/parameter_sweep/` (κ/κ* sweep CSVs such as `equilibrium_sweep.csv`, `parameter_sweep.csv`, and optional `backward_sweep.csv`)
+- `docs/` (ensemble validation report + methodology notes)
+- `manuscript_snippets/` (LaTeX table + caption snippets)
 
 **Configuration:**
 - Set `DEBUG = true` at the top of each script for detailed diagnostics
@@ -419,6 +453,62 @@ using .PhylogeneticDiagram
 - All core functionality works with the base BeliefSim installation
 
 ---
+
+## Model simulated in numerics
+
+The ensemble pipelines (`fig6_ensemble_enhanced.jl` and the downstream figure generator) simulate the **OU-with-Poisson-resets (OU-PR)** model using `StepHazard(nu0)` and partial resets of depth `c0`. This is the numerical counterpart of the OU-with-resets generator used in the theory. Boundary-hitting OU (OU-BR) is not simulated in the default scripts unless explicitly stated.
+
+## Interpreting symmetry
+
+Because the dynamics are Z2-symmetric, above kappa* each run selects a + or - branch. Consequently, the **signed mean** E[m(t)] can remain near zero even when symmetry breaking occurs. We therefore report **E|m(t)|**, **RMS(m(t))**, and the **aligned mean** (sign-flipped per run) as primary order parameters, and we export terminal mean diagnostics to show bimodality. Density plots distinguish the **mixture density** (symmetric by construction) from the **aligned density** (branch-aligned).
+
+## Reproducing figures
+
+Run the ensemble pipeline (produces metadata + CSVs), then the publication figure generator:
+
+```bash
+julia --project=. scripts/fig6_ensemble_enhanced.jl
+julia --project=. scripts/generate_bifurcation_figures.jl
+```
+
+For distributed runs (use all CPUs minus one), start Julia with workers:
+
+```bash
+julia --project=. -p $(($(sysctl -n hw.ncpu)-1)) scripts/fig6_ensemble_enhanced.jl
+```
+
+For threaded runs instead, use:
+
+```bash
+JULIA_NUM_THREADS=$((`sysctl -n hw.ncpu`-1)) julia --project=. scripts/fig6_ensemble_enhanced.jl
+```
+
+Outputs land in:
+- `outputs/ensemble_results/` (metadata, trajectories, terminal means, densities)
+- `outputs/parameter_sweep/` (sweep CSVs; used for phase‑diagram plots)
+- `figs/` (publication‑ready PDFs)
+
+## Outputs glossary
+
+Key files written by the ensemble pipeline:
+
+- `outputs/ensemble_results/metadata.json`  
+  Parameters, simulation settings, and computed quantities (V*, kappa*, V_baseline, kappa_eff, beta_hat, C_hat).
+- `outputs/ensemble_results/ensemble_trajectories.csv`  
+  Columns: `mean_signed`, `mean_abs`, `mean_rms`, `mean_aligned` (decided runs only), their CI bounds, plus variance and CI. Also includes branch shares (`decided_share`, `plus_share`, `minus_share`, `undecided_share`) per scenario.
+- `outputs/ensemble_results/terminal_means.csv`  
+  Columns: `scenario`, `run_id`, `mean_late`, `abs_mean_late`, `branch_sign`, `decided_flag`.
+- `outputs/ensemble_results/density_snapshots.csv`  
+  Columns: mixture/aligned/plus/minus densities with CI bounds on a common grid.
+- `outputs/ensemble_results/density_moments.csv`  
+  Columns: `integral_mixture`, `integral_aligned`, `mu_mix`, `mu_aligned`, `var_mix` per scenario and snapshot time (sanity checks).
+
+## Sanity checks
+
+- **Below kappa\***: mean_abs(T) ≈ O(N^{-1/2}) and terminal means unimodal near 0.
+- **Above kappa\***: mean_abs(T) > 0 and terminal means bimodal around +/- m*.
+- **Density alignment**: mixture density remains symmetric, aligned density reveals the branch.
+- **Density moments**: integrals are ~1; for below/critical, mu_mix ≈ 0; above kappa*, mu_aligned > 0 at late times.
 
 ## YAML configuration reference
 

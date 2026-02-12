@@ -40,10 +40,18 @@ const KAPPA_N   = 400
 # If strict, throw when lambda + kappa <= 0 (invalid linearisation region).
 const STRICT_KAPPA = false
 
-const L_LIST = [10.0, 20.0]
-const M_LIST = [401, 801]
+const L_LIST = [10.0, 12.0, 15.0, 20.0]
+const L0 = 10.0
+const M0 = 801
+const DX_TARGET = 2 * L0 / (M0 - 1)
 
-const NU0_LIST = [7.0, 10.0, 10.5, 12.5]
+const NU0_LIST = [7.0, 12.5, 50.0]
+
+# Branch selection options for the spectral routine.
+const USE_ODDSPACE = true
+const USE_TRACKING = false
+const ODD_SELECT = :parity
+const TOL_ODD = 1e-6
 
 const RESIDUAL_MODE   = :matrix   # :matrix, :operator, :none
 const RESIDUAL_THRESH = 1e-6
@@ -60,7 +68,7 @@ const DO_TOPK = false
 const TOPK = 10
 const TOPK_KAPPAS = [8.0, 11.0, 20.0]  # ensure within [KAPPA_MIN, KAPPA_MAX] if DO_TOPK
 const TOPK_ALL_LM = false
-const TOPK_LM = (10.0, 401)
+const TOPK_LM = (L0, M0)
 
 const OUT_ROOT = joinpath("figs", "eigen_diag", "validity")
 mkpath(OUT_ROOT)
@@ -70,6 +78,15 @@ mkpath(OUT_ROOT)
 # ----------------------------
 function tag_float(x::Real)
     return replace(string(x), "." => "p")
+end
+
+function nearest_odd(n::Int)
+    return isodd(n) ? n : n + 1
+end
+
+function m_for_L(L::Float64)
+    m = Int(round(2 * L / DX_TARGET)) + 1
+    return max(3, nearest_odd(m))
 end
 
 function default_params(nu0::Float64)
@@ -133,6 +150,11 @@ function hazard_intensity_probe(p::Params; expected_nu0::Float64)
 end
 
 function safe_leading_odd_eigenvalue(p; kappa::Float64, L::Float64, M::Int,
+                                     odd_select::Symbol=:parity,
+                                     tol_odd::Float64=1e-6,
+                                     track::Bool=false,
+                                     prev_vec=nothing,
+                                     oddspace::Bool=false,
                                      return_diag::Bool=false,
                                      return_mats::Bool=false,
                                      return_ops::Bool=false)
@@ -142,6 +164,11 @@ function safe_leading_odd_eigenvalue(p; kappa::Float64, L::Float64, M::Int,
             κ=kappa,
             L=L,
             M=M,
+            odd_select=odd_select,
+            tol_odd=tol_odd,
+            track=track,
+            prev_vec=prev_vec,
+            oddspace=oddspace,
             return_diag=return_diag,
             return_mats=return_mats,
             return_ops=return_ops
@@ -266,10 +293,18 @@ function compute_plateau_stats(kappa_grid, lambda1; tail_frac, plateau_tol, plat
 end
 
 function write_curve_csv(outpath, kappa_grid, lambda_eff, lambda1, dlambda,
-                         status, converged, niter, solver_info, solver_resid, residual_check)
+                         status, converged, niter, solver_info, solver_resid, residual_check,
+                         parity_defect_odd, parity_defect_even,
+                         boundary_mass_1pct, boundary_mass_5pct,
+                         hazard_mass, overlap_prev, generator_mass_err,
+                         nu0_expected, nu0_used)
     header = [
         "kappa", "lambda_eff", "lambda1", "dlambda", "status",
-        "converged", "niter", "solver_info", "solver_resid", "residual_check"
+        "converged", "niter", "solver_info", "solver_resid", "residual_check",
+        "parity_defect_odd", "parity_defect_even",
+        "boundary_mass_1pct", "boundary_mass_5pct",
+        "hazard_mass", "overlap_prev", "generator_mass_err",
+        "nu0_expected", "nu0_used"
     ]
     open(outpath, "w") do io
         writedlm(io, permutedims(header), ',')
@@ -280,7 +315,16 @@ function write_curve_csv(outpath, kappa_grid, lambda_eff, lambda1, dlambda,
                 niter[i],
                 solver_info[i],
                 solver_resid[i],
-                residual_check[i]
+                residual_check[i],
+                parity_defect_odd[i],
+                parity_defect_even[i],
+                boundary_mass_1pct[i],
+                boundary_mass_5pct[i],
+                hazard_mass[i],
+                overlap_prev[i],
+                generator_mass_err[i],
+                nu0_expected[i],
+                nu0_used[i]
             ]), ',')
         end
     end
@@ -449,201 +493,268 @@ function main()
         hazard_mismatch_flag = probe.mismatch ? 1 : 0
 
         for L in L_LIST
-            for M in M_LIST
-                @info "kappa sweep" nu0 L M
+            M = m_for_L(L)
+            du = 2 * L / (M - 1)
+            @info "kappa sweep" nu0 L M du
 
-                n = length(kappa_grid)
-                lambda1 = fill(NaN, n)
-                lambda_eff = fill(NaN, n)
-                status = fill("ok", n)
-                converged = fill(false, n)
-                niter = fill(0, n)
-                solver_info = fill("", n)
-                solver_resid = fill(NaN, n)
-                residual_check = fill(NaN, n)
+            n = length(kappa_grid)
+            lambda1 = fill(NaN, n)
+            lambda_eff = fill(NaN, n)
+            status = fill("ok", n)
+            converged = fill(false, n)
+            niter = fill(0, n)
+            solver_info = fill("", n)
+            solver_resid = fill(NaN, n)
+            residual_check = fill(NaN, n)
+            parity_defect_odd = fill(NaN, n)
+            parity_defect_even = fill(NaN, n)
+            boundary_mass_1pct = fill(NaN, n)
+            boundary_mass_5pct = fill(NaN, n)
+            hazard_mass = fill(NaN, n)
+            overlap_prev = fill(NaN, n)
+            generator_mass_err = fill(NaN, n)
+            nu0_expected = fill(NaN, n)
+            nu0_used = fill(NaN, n)
 
-                return_mats = RESIDUAL_MODE == :matrix
-                return_ops = RESIDUAL_MODE == :operator
+            return_mats = RESIDUAL_MODE == :matrix
+            return_ops = RESIDUAL_MODE == :operator
+            track_flag = USE_TRACKING && !USE_ODDSPACE
+            prev_vec = nothing
 
-                for (i, kappa) in enumerate(kappa_grid)
-                    # Domain guard: linearisation is invalid when lambda + kappa <= 0.
-                    lambda_eff[i] = p.λ + kappa
-                    if lambda_eff[i] <= 0
-                        if STRICT_KAPPA
-                            throw(ArgumentError("Invalid kappa: lambda + kappa <= 0 (kappa=$(kappa), lambda=$(p.λ))"))
-                        end
-                        status[i] = "invalid_kappa"
-                        lambda1[i] = NaN
-                        converged[i] = false
-                        solver_info[i] = "invalid_kappa"
-                        solver_resid[i] = NaN
+            for (i, kappa) in enumerate(kappa_grid)
+                # Domain guard: linearisation is invalid when lambda + kappa <= 0.
+                lambda_eff[i] = p.λ + kappa
+                if lambda_eff[i] <= 0
+                    if STRICT_KAPPA
+                        throw(ArgumentError("Invalid kappa: lambda + kappa <= 0 (kappa=$(kappa), lambda=$(p.λ))"))
+                    end
+                    status[i] = "invalid_kappa"
+                    lambda1[i] = NaN
+                    converged[i] = false
+                    solver_info[i] = "invalid_kappa"
+                    solver_resid[i] = NaN
+                    residual_check[i] = NaN
+                    continue
+                end
+
+                lambda1[i], diag = safe_leading_odd_eigenvalue(
+                    p;
+                    kappa=kappa,
+                    L=L,
+                    M=M,
+                    odd_select=ODD_SELECT,
+                    tol_odd=TOL_ODD,
+                    track=track_flag,
+                    prev_vec=prev_vec,
+                    oddspace=USE_ODDSPACE,
+                    return_diag=true,
+                    return_mats=return_mats,
+                    return_ops=return_ops
+                )
+
+                if diag === nothing
+                    status[i] = "failure"
+                    converged[i] = false
+                    niter[i] = 0
+                    solver_info[i] = "error"
+                    solver_resid[i] = NaN
+                    residual_check[i] = NaN
+                else
+                    status[i] = "ok"
+                    converged[i] = diag.converged
+                    niter[i] = diag.niter
+                    solver_info[i] = string(diag.info)
+                    solver_resid[i] = diag.solver_resid
+                    parity_defect_odd[i] = diag.parity_defect_odd
+                    parity_defect_even[i] = diag.parity_defect_even
+                    boundary_mass_1pct[i] = diag.boundary_mass_1pct
+                    boundary_mass_5pct[i] = diag.boundary_mass_5pct
+                    hazard_mass[i] = diag.hazard_mass
+                    overlap_prev[i] = diag.overlap_prev
+                    generator_mass_err[i] = diag.generator_mass_err
+                    nu0_expected[i] = diag.nu0_expected
+                    nu0_used[i] = diag.nu0_used
+                    try
+                        residual_check[i] = residual_check_from_diag(diag)
+                    catch err
+                        @warn "residual_check failed" kappa L M err
                         residual_check[i] = NaN
+                    end
+                    if track_flag
+                        prev_vec = hasproperty(diag, :v) ? diag.v : diag.x
+                    end
+                end
+            end
+
+            dlambda = central_diff(kappa_grid, lambda1)
+            crossings = find_zero_crossings(kappa_grid, lambda1)
+            kappa_cross_1 = length(crossings) >= 1 ? crossings[1] : NaN
+            kappa_cross_2 = length(crossings) >= 2 ? crossings[2] : NaN
+
+            plateau = compute_plateau_stats(
+                kappa_grid, lambda1;
+                tail_frac=TAIL_FRAC,
+                plateau_tol=PLATEAU_TOL,
+                plateau_run=PLATEAU_RUN
+            )
+
+            valid_idx = findall(isfinite, lambda1)
+            kappa_peak = NaN
+            lambda_peak = NaN
+            if !isempty(valid_idx)
+                imax = valid_idx[argmax(lambda1[valid_idx])]
+                kappa_peak = kappa_grid[imax]
+                lambda_peak = lambda1[imax]
+            end
+
+            n_invalid_kappa = count(s -> s == "invalid_kappa", status)
+            n_fail = count(s -> s == "failure", status)
+            lambda_eff_valid = filter(x -> x > 0, lambda_eff)
+            min_lambda_eff = isempty(lambda_eff_valid) ? NaN : minimum(lambda_eff_valid)
+            resid_valid = filter(isfinite, residual_check)
+            residual_max = isempty(resid_valid) ? NaN : maximum(resid_valid)
+            dlambda_valid = filter(isfinite, dlambda)
+            dlambda_min = isempty(dlambda_valid) ? NaN : minimum(dlambda_valid)
+            dlambda_max = isempty(dlambda_valid) ? NaN : maximum(dlambda_valid)
+            generr_valid = filter(isfinite, generator_mass_err)
+            generator_mass_err_median = isempty(generr_valid) ? NaN : median(generr_valid)
+
+            boundary_mass_cross_max = NaN
+            if isfinite(kappa_cross_1)
+                idx_cross = findall(i -> isfinite(boundary_mass_5pct[i]) &&
+                                    abs(kappa_grid[i] - kappa_cross_1) <= 2 * dk, eachindex(kappa_grid))
+                if !isempty(idx_cross)
+                    boundary_mass_cross_max = maximum(boundary_mass_5pct[idx_cross])
+                end
+            end
+
+            mode_notes = String[]
+            if track_flag
+                overlap_valid = filter(isfinite, overlap_prev)
+                if !isempty(overlap_valid) && minimum(overlap_valid) < 0.2
+                    push!(mode_notes, "overlap_drop")
+                end
+            end
+            parity_valid = filter(isfinite, parity_defect_odd)
+            if !isempty(parity_valid) &&
+               maximum(parity_valid) > 10 * max(TOL_ODD, 1e-12) &&
+               minimum(parity_valid) <= TOL_ODD
+                push!(mode_notes, "parity_jump")
+            end
+            mode_switch_flag = isempty(mode_notes) ? "" : join(mode_notes, ";")
+
+            tag = @sprintf("h%s_L%s_M%d", tag_float(nu0), tag_float(L), M)
+            curve_csv = joinpath(OUT_ROOT, "lambda_curve_" * tag * ".csv")
+            write_curve_csv(curve_csv, kappa_grid, lambda_eff, lambda1, dlambda,
+                            status, converged, niter, solver_info, solver_resid, residual_check,
+                            parity_defect_odd, parity_defect_even,
+                            boundary_mass_1pct, boundary_mass_5pct,
+                            hazard_mass, overlap_prev, generator_mass_err,
+                            nu0_expected, nu0_used)
+
+            if !isempty(valid_idx)
+                bad_conv_idx = findall(i -> !converged[i] && isfinite(lambda1[i]), eachindex(converged))
+                bad_resid_idx = findall(
+                    i -> isfinite(residual_check[i]) && residual_check[i] > RESIDUAL_THRESH && isfinite(lambda1[i]),
+                    eachindex(residual_check)
+                )
+
+                lambda_plot = joinpath(OUT_ROOT, "lambda_curve_" * tag * ".pdf")
+                save_lambda_plot(
+                    kappa_grid, lambda1, dlambda, crossings;
+                    L=L, M=M, nu0=nu0, outpath=lambda_plot,
+                    plateau_onset=plateau.plateau_onset_kappa,
+                    plateau_level=plateau.plateau_level,
+                    kappa_peak=kappa_peak,
+                    lambda_peak=lambda_peak,
+                    bad_conv_idx=bad_conv_idx,
+                    bad_resid_idx=bad_resid_idx
+                )
+
+                if RESIDUAL_MODE != :none
+                    resid_plot = joinpath(OUT_ROOT, "residual_curve_" * tag * ".pdf")
+                    save_residual_plot(kappa_grid, residual_check; L=L, M=M, nu0=nu0, outpath=resid_plot)
+                end
+            else
+                @warn "All lambda1 values are NaN" nu0 L M
+            end
+
+            plateau_level_target = -nu0
+            plateau_onset_target = p.λ + nu0
+            plateau_level_match = isfinite(plateau.plateau_level) && abs(plateau.plateau_level - plateau_level_target) <= PLATEAU_TOL
+            plateau_onset_match = isfinite(plateau.plateau_onset_kappa) && abs(plateau.plateau_onset_kappa - plateau_onset_target) <= onset_tol
+
+            push!(summary_rows, Dict(
+                "timestamp" => string(Dates.now()),
+                "nu0" => nu0,
+                "L" => L,
+                "M" => M,
+                "du" => du,
+                "observed_nu_at_100" => observed_nu_at_100,
+                "hazard_mismatch_flag" => hazard_mismatch_flag,
+                "n_invalid_kappa" => n_invalid_kappa,
+                "n_fail" => n_fail,
+                "min_lambda_eff" => min_lambda_eff,
+                "n_crossings" => length(crossings),
+                "kappa_cross_1" => kappa_cross_1,
+                "kappa_cross_2" => kappa_cross_2,
+                "kappa_peak" => kappa_peak,
+                "lambda_peak" => lambda_peak,
+                "dlambda_min" => dlambda_min,
+                "dlambda_max" => dlambda_max,
+                "boundary_mass_cross_max" => boundary_mass_cross_max,
+                "generator_mass_err_median" => generator_mass_err_median,
+                "mode_switch_flag" => mode_switch_flag,
+                "plateau_level" => plateau.plateau_level,
+                "plateau_onset" => plateau.plateau_onset_kappa,
+                "plateau_level_target" => plateau_level_target,
+                "plateau_onset_target" => plateau_onset_target,
+                "plateau_level_match" => plateau_level_match ? 1 : 0,
+                "plateau_onset_match" => plateau_onset_match ? 1 : 0,
+                "residual_max" => residual_max
+            ))
+
+            if DO_TOPK && (TOPK_ALL_LM || (L == TOPK_LM[1] && M == TOPK_LM[2]))
+                for kappa_spec in TOPK_KAPPAS
+                    if kappa_spec < KAPPA_MIN || kappa_spec > KAPPA_MAX
+                        continue
+                    end
+                    if p.λ + kappa_spec <= 0
                         continue
                     end
 
-                    lambda1[i], diag = safe_leading_odd_eigenvalue(
+                    lambda_spec, diag_spec = safe_leading_odd_eigenvalue(
                         p;
-                        kappa=kappa,
+                        kappa=kappa_spec,
                         L=L,
                         M=M,
                         return_diag=true,
-                        return_mats=return_mats,
-                        return_ops=return_ops
+                        return_mats=true,
+                        return_ops=false
+                    )
+                    if diag_spec === nothing || diag_spec.A === nothing || diag_spec.xgrid === nothing
+                        @warn "spectrum: missing matrix" kappa_spec nu0 L M
+                        continue
+                    end
+
+                    vals, _, weights = topk_odd_spectrum_from_matrix(
+                        diag_spec.A,
+                        diag_spec.xgrid;
+                        corr_tol=1e-3,
+                        k=TOPK
                     )
 
-                    if diag === nothing
-                        status[i] = "failure"
-                        converged[i] = false
-                        niter[i] = 0
-                        solver_info[i] = "error"
-                        solver_resid[i] = NaN
-                        residual_check[i] = NaN
-                    else
-                        status[i] = "ok"
-                        converged[i] = diag.converged
-                        niter[i] = diag.niter
-                        solver_info[i] = string(diag.info)
-                        solver_resid[i] = diag.solver_resid
-                        try
-                            residual_check[i] = residual_check_from_diag(diag)
-                        catch err
-                            @warn "residual_check failed" kappa L M err
-                            residual_check[i] = NaN
+                    tag_spec = @sprintf("kappa%s_h%s_L%s_M%d", tag_float(kappa_spec), tag_float(nu0), tag_float(L), M)
+                    spec_csv = joinpath(OUT_ROOT, "spec_" * tag_spec * ".csv")
+                    open(spec_csv, "w") do io
+                        writedlm(io, permutedims(["index", "eig_real", "eig_imag", "odd_weight"]), ',')
+                        for i in 1:length(vals)
+                            writedlm(io, permutedims(Any[i, real(vals[i]), imag(vals[i]), weights[i]]), ',')
                         end
                     end
-                end
 
-                dlambda = central_diff(kappa_grid, lambda1)
-                crossings = find_zero_crossings(kappa_grid, lambda1)
-                kappa_cross_1 = length(crossings) >= 1 ? crossings[1] : NaN
-                kappa_cross_2 = length(crossings) >= 2 ? crossings[2] : NaN
-
-                plateau = compute_plateau_stats(
-                    kappa_grid, lambda1;
-                    tail_frac=TAIL_FRAC,
-                    plateau_tol=PLATEAU_TOL,
-                    plateau_run=PLATEAU_RUN
-                )
-
-                valid_idx = findall(isfinite, lambda1)
-                kappa_peak = NaN
-                lambda_peak = NaN
-                if !isempty(valid_idx)
-                    imax = valid_idx[argmax(lambda1[valid_idx])]
-                    kappa_peak = kappa_grid[imax]
-                    lambda_peak = lambda1[imax]
-                end
-
-                n_invalid_kappa = count(s -> s == "invalid_kappa", status)
-                n_fail = count(s -> s == "failure", status)
-                lambda_eff_valid = filter(x -> x > 0, lambda_eff)
-                min_lambda_eff = isempty(lambda_eff_valid) ? NaN : minimum(lambda_eff_valid)
-                resid_valid = filter(isfinite, residual_check)
-                residual_max = isempty(resid_valid) ? NaN : maximum(resid_valid)
-
-                tag = @sprintf("h%s_L%s_M%d", tag_float(nu0), tag_float(L), M)
-                curve_csv = joinpath(OUT_ROOT, "lambda_curve_" * tag * ".csv")
-                write_curve_csv(curve_csv, kappa_grid, lambda_eff, lambda1, dlambda,
-                                status, converged, niter, solver_info, solver_resid, residual_check)
-
-                if !isempty(valid_idx)
-                    bad_conv_idx = findall(i -> !converged[i] && isfinite(lambda1[i]), eachindex(converged))
-                    bad_resid_idx = findall(
-                        i -> isfinite(residual_check[i]) && residual_check[i] > RESIDUAL_THRESH && isfinite(lambda1[i]),
-                        eachindex(residual_check)
-                    )
-
-                    lambda_plot = joinpath(OUT_ROOT, "lambda_curve_" * tag * ".pdf")
-                    save_lambda_plot(
-                        kappa_grid, lambda1, dlambda, crossings;
-                        L=L, M=M, nu0=nu0, outpath=lambda_plot,
-                        plateau_onset=plateau.plateau_onset_kappa,
-                        plateau_level=plateau.plateau_level,
-                        kappa_peak=kappa_peak,
-                        lambda_peak=lambda_peak,
-                        bad_conv_idx=bad_conv_idx,
-                        bad_resid_idx=bad_resid_idx
-                    )
-
-                    if RESIDUAL_MODE != :none
-                        resid_plot = joinpath(OUT_ROOT, "residual_curve_" * tag * ".pdf")
-                        save_residual_plot(kappa_grid, residual_check; L=L, M=M, nu0=nu0, outpath=resid_plot)
-                    end
-                else
-                    @warn "All lambda1 values are NaN" nu0 L M
-                end
-
-                plateau_level_target = -nu0
-                plateau_onset_target = p.λ + nu0
-                plateau_level_match = isfinite(plateau.plateau_level) && abs(plateau.plateau_level - plateau_level_target) <= PLATEAU_TOL
-                plateau_onset_match = isfinite(plateau.plateau_onset_kappa) && abs(plateau.plateau_onset_kappa - plateau_onset_target) <= onset_tol
-
-                push!(summary_rows, Dict(
-                    "timestamp" => string(Dates.now()),
-                    "nu0" => nu0,
-                    "L" => L,
-                    "M" => M,
-                    "observed_nu_at_100" => observed_nu_at_100,
-                    "hazard_mismatch_flag" => hazard_mismatch_flag,
-                    "n_invalid_kappa" => n_invalid_kappa,
-                    "n_fail" => n_fail,
-                    "min_lambda_eff" => min_lambda_eff,
-                    "n_crossings" => length(crossings),
-                    "kappa_cross_1" => kappa_cross_1,
-                    "kappa_cross_2" => kappa_cross_2,
-                    "kappa_peak" => kappa_peak,
-                    "lambda_peak" => lambda_peak,
-                    "plateau_level" => plateau.plateau_level,
-                    "plateau_onset" => plateau.plateau_onset_kappa,
-                    "plateau_level_target" => plateau_level_target,
-                    "plateau_onset_target" => plateau_onset_target,
-                    "plateau_level_match" => plateau_level_match ? 1 : 0,
-                    "plateau_onset_match" => plateau_onset_match ? 1 : 0,
-                    "residual_max" => residual_max
-                ))
-
-                if DO_TOPK && (TOPK_ALL_LM || (L == TOPK_LM[1] && M == TOPK_LM[2]))
-                    for kappa_spec in TOPK_KAPPAS
-                        if kappa_spec < KAPPA_MIN || kappa_spec > KAPPA_MAX
-                            continue
-                        end
-                        if p.λ + kappa_spec <= 0
-                            continue
-                        end
-
-                        lambda_spec, diag_spec = safe_leading_odd_eigenvalue(
-                            p;
-                            kappa=kappa_spec,
-                            L=L,
-                            M=M,
-                            return_diag=true,
-                            return_mats=true,
-                            return_ops=false
-                        )
-                        if diag_spec === nothing || diag_spec.A === nothing || diag_spec.xgrid === nothing
-                            @warn "spectrum: missing matrix" kappa_spec nu0 L M
-                            continue
-                        end
-
-                        vals, _, weights = topk_odd_spectrum_from_matrix(
-                            diag_spec.A,
-                            diag_spec.xgrid;
-                            corr_tol=1e-3,
-                            k=TOPK
-                        )
-
-                        tag_spec = @sprintf("kappa%s_h%s_L%s_M%d", tag_float(kappa_spec), tag_float(nu0), tag_float(L), M)
-                        spec_csv = joinpath(OUT_ROOT, "spec_" * tag_spec * ".csv")
-                        open(spec_csv, "w") do io
-                            writedlm(io, permutedims(["index", "eig_real", "eig_imag", "odd_weight"]), ',')
-                            for i in 1:length(vals)
-                                writedlm(io, permutedims(Any[i, real(vals[i]), imag(vals[i]), weights[i]]), ',')
-                            end
-                        end
-
-                        spec_plot = joinpath(OUT_ROOT, "spectrum_" * tag_spec * ".pdf")
-                        save_spectrum_plot(vals, kappa_spec, nu0, p; L=L, M=M, outpath=spec_plot)
-                    end
+                    spec_plot = joinpath(OUT_ROOT, "spectrum_" * tag_spec * ".pdf")
+                    save_spectrum_plot(vals, kappa_spec, nu0, p; L=L, M=M, outpath=spec_plot)
                 end
             end
         end
@@ -653,10 +764,13 @@ function main()
     summary_path = joinpath(OUT_ROOT, "plateau_hazard_summary.csv")
     summary_header = [
         "timestamp", "nu0", "L", "M",
+        "du",
         "observed_nu_at_100", "hazard_mismatch_flag",
         "n_invalid_kappa", "n_fail", "min_lambda_eff",
         "n_crossings", "kappa_cross_1", "kappa_cross_2",
         "kappa_peak", "lambda_peak",
+        "dlambda_min", "dlambda_max",
+        "boundary_mass_cross_max", "generator_mass_err_median", "mode_switch_flag",
         "plateau_level", "plateau_onset",
         "plateau_level_target", "plateau_onset_target",
         "plateau_level_match", "plateau_onset_match",
@@ -667,10 +781,13 @@ function main()
         for row in summary_rows
             writedlm(io, permutedims(Any[
                 row["timestamp"], row["nu0"], row["L"], row["M"],
+                row["du"],
                 row["observed_nu_at_100"], row["hazard_mismatch_flag"],
                 row["n_invalid_kappa"], row["n_fail"], row["min_lambda_eff"],
                 row["n_crossings"], row["kappa_cross_1"], row["kappa_cross_2"],
                 row["kappa_peak"], row["lambda_peak"],
+                row["dlambda_min"], row["dlambda_max"],
+                row["boundary_mass_cross_max"], row["generator_mass_err_median"], row["mode_switch_flag"],
                 row["plateau_level"], row["plateau_onset"],
                 row["plateau_level_target"], row["plateau_onset_target"],
                 row["plateau_level_match"], row["plateau_onset_match"],
