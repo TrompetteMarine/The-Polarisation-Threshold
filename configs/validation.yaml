@@ -1,0 +1,50 @@
+name: numerical_validation
+output_dir: artifacts/numerical_validation
+
+params:
+  lambda: 0.85
+  sigma: 0.80
+  theta: 2.00
+  c0: 0.80
+  hazard:
+    kind: step
+    nu0: 10.5
+
+grid:
+  dt: [0.01, 0.005, 0.001]
+  N: [2000, 5000, 10000]
+  impl: ["first_crossing", "interp"]
+  seeds: 20
+  seed_base: 20260218
+
+runtime:
+  T: 400.0
+  burn_in: 120.0
+  mt_stride: 5
+  growth_scan:
+    epsilon: 1.0e-2
+    window: [2.0, 40.0]
+    kappa_min_factor: 0.6
+    kappa_max_factor: 1.5
+    grid_points: 9
+    bisection_iters: 12
+    bisection_tol: 1.0e-3
+    n_boot: 200
+  beta_fit:
+    delta_window: [0.05, 0.20]
+    kappa_points: 8
+    late_window_frac: 0.2
+    n_boot: 200
+    min_points: 4
+  bimodality:
+    threshold: 0.55
+
+quick:
+  seeds: 5
+  T: 120.0
+  burn_in: 40.0
+  bisection_iters: 6
+  bisection_tol: 2.0e-3
+  growth_scan_n_boot: 50
+  beta_n_boot: 50
+  kappa_points: 5

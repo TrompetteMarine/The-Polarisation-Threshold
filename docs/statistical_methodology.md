@@ -17,6 +17,12 @@ for completeness as a diagnostic of symmetry cancellation.
 We estimate growth rates using log-linear regression on |m(t)|. Confidence intervals use a t-distribution
 with df = n_ensemble − 1. One-sample t-tests are used to test H₀: λ = 0.
 
+## Threshold estimation (Route A / Route B)
+
+- **Route A (empirical)**: scan κ and fit the growth rate of E|m(t)|; κ*_A is the zero-crossing of λ̂(κ), with bootstrap CI.
+- **Route B (theory)**: compute κ*_B from the odd-mode susceptibility of the linearised OU‑PR generator with sign‑preserving resets.
+Both values are stored in `outputs/threshold/metadata.json` and used by the plotting scripts.
+
 ## Branch diagnostics
 
 For each run we define a branch sign using the late-time mean:

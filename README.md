@@ -462,6 +462,8 @@ The ensemble pipelines (`fig6_ensemble_enhanced.jl` and the downstream figure ge
 
 Because the dynamics are Z2-symmetric, above kappa* each run selects a + or - branch. Consequently, the **signed mean** E[m(t)] can remain near zero even when symmetry breaking occurs. We therefore report **E|m(t)|**, **RMS(m(t))**, and the **aligned mean** (sign-flipped per run) as primary order parameters, and we export terminal mean diagnostics to show bimodality. Density plots distinguish the **mixture density** (symmetric by construction) from the **aligned density** (branch-aligned).
 
+Finite ensembles can exhibit small **E[m(t)] ≠ 0** even when the true mean is zero; this is expected finite‑sample imbalance. The dynamics figure therefore shows both E|m(t)| and E[m(t)] so cancellation and imbalance are explicit.
+
 ## Reproducing figures
 
 Run the ensemble pipeline (produces metadata + CSVs), then the publication figure generator:
@@ -471,10 +473,48 @@ julia --project=. scripts/fig6_ensemble_enhanced.jl
 julia --project=. scripts/generate_bifurcation_figures.jl
 ```
 
+To regenerate **only the figures** from existing outputs (no simulations), use:
+
+```bash
+julia --project=. scripts/plot_from_outputs.jl --all
+```
+
+You can also select subsets:
+
+```bash
+julia --project=. scripts/plot_from_outputs.jl --density
+julia --project=. scripts/plot_from_outputs.jl --dynamics
+julia --project=. scripts/plot_from_outputs.jl --robustness
+```
+
+The figure generator reads `outputs/threshold/metadata.json` (κ*_A/κ*_B) and the sweep CSVs to keep labels and vertical reference lines consistent with the theory.
+
+Run modes and sample sizes (set in `scripts/fig6_ensemble_enhanced.jl`):
+
+- `RUN_MODE = :fast` (default): n_ensemble_scenarios = 20, n_ensemble_kappa_sweep = 10, n_rep_per_kappa_nearcrit = 1
+- `RUN_MODE = :pub`: n_ensemble_scenarios = 200, n_ensemble_kappa_sweep = 80, n_rep_per_kappa_nearcrit = 3
+
+Use `:pub` for stable branch shares and small mixture mean (E[m]≈0). For diagnostics, `:fast` is sufficient.
+
+Recommended publication settings: **N ≥ 20000**, **n_ensemble ≥ 10**, and a dense near‑critical sweep (default). For fast diagnostics, enable `fast_mode=true` in `fig6_ensemble_enhanced.jl`.
+
 For distributed runs (use all CPUs minus one), start Julia with workers:
 
 ```bash
 julia --project=. -p $(($(sysctl -n hw.ncpu)-1)) scripts/fig6_ensemble_enhanced.jl
+```
+
+Optional speed/debug flags:
+
+```bash
+# Skip heavy growth scan (use kappa*_B as reference)
+julia --project=. scripts/fig6_ensemble_enhanced.jl --skip-growth-scan
+
+# Skip scaling regression sweep
+julia --project=. scripts/fig6_ensemble_enhanced.jl --skip-scaling
+
+# Reuse existing scaling_regression_data.csv (no resweep)
+julia --project=. scripts/fig6_ensemble_enhanced.jl --reuse-scaling
 ```
 
 For threaded runs instead, use:
@@ -483,8 +523,19 @@ For threaded runs instead, use:
 JULIA_NUM_THREADS=$((`sysctl -n hw.ncpu`-1)) julia --project=. scripts/fig6_ensemble_enhanced.jl
 ```
 
+Experimental modular driver (thin wrapper; preserves outputs):
+
+```bash
+julia --project=. scripts/fig6_driver.jl -fast
+julia --project=. scripts/fig6_driver.jl -pub
+```
+
+The driver emits a machine-readable summary line at the very end:
+`[RESULT] scaling_pass=... beta_hat=... beta_ci=[..., ...] method=... kappa_star_eff=...`
+
 Outputs land in:
 - `outputs/ensemble_results/` (metadata, trajectories, terminal means, densities)
+- `outputs/threshold/` (Route A/B κ* estimates and growth/susceptibility scans)
 - `outputs/parameter_sweep/` (sweep CSVs; used for phase‑diagram plots)
 - `figs/` (publication‑ready PDFs)
 
@@ -493,15 +544,45 @@ Outputs land in:
 Key files written by the ensemble pipeline:
 
 - `outputs/ensemble_results/metadata.json`  
-  Parameters, simulation settings, and computed quantities (V*, kappa*, V_baseline, kappa_eff, beta_hat, C_hat).
+  Parameters, simulation settings, and computed quantities (V*, kappa*_ref, kappa*_A, kappa*_B, V_baseline, kappa*_eff, beta_hat, C_hat).
 - `outputs/ensemble_results/ensemble_trajectories.csv`  
   Columns: `mean_signed`, `mean_abs`, `mean_rms`, `mean_aligned` (decided runs only), their CI bounds, plus variance and CI. Also includes branch shares (`decided_share`, `plus_share`, `minus_share`, `undecided_share`) per scenario.
 - `outputs/ensemble_results/terminal_means.csv`  
-  Columns: `scenario`, `run_id`, `mean_late`, `abs_mean_late`, `branch_sign`, `decided_flag`.
+  Columns: `scenario`, `kappa`, `kappa_ratio`, `run_id`, `mean_late`, `abs_mean_late`, `branch_sign`, `decided_flag`.
 - `outputs/ensemble_results/density_snapshots.csv`  
   Columns: mixture/aligned/plus/minus densities with CI bounds on a common grid.
 - `outputs/ensemble_results/density_moments.csv`  
   Columns: `integral_mixture`, `integral_aligned`, `mu_mix`, `mu_aligned`, `var_mix` per scenario and snapshot time (sanity checks).
+- `outputs/parameter_sweep/equilibrium_sweep.csv`  
+  Columns: `kappa`, `kappa_ratio`, `m_abs_star`, `m_corr_star`, `decided_share`, `converged`, and variance diagnostics.
+- `outputs/parameter_sweep/scaling_regression_data.csv`  
+  Per-κ dataset used for the log–log scaling regression. Includes `kappa`, `delta_rel`, `delta_abs`, `m_abs_star`, `m_corr`,
+  `m_abs_ci`, `converged`, `decided_share`, `p_plus`, `p_minus`, `imbalance`, and `used` flags. The regression uses
+  `x = log(kappa - kappa*_B)` and `y = log(M_corr)` with an intercept.
+- `outputs/threshold/metadata.json`  
+  Route A/B threshold estimates used by the plotting scripts (kappa*_A, kappa*_B, Phi0, grid settings).
+- `outputs/threshold/kappa_star_A.json`  
+  Empirical κ*_A estimate with CI and growth‑scan settings.
+- `outputs/threshold/kappa_star_B.json`  
+  Theoretical κ*_B estimate from the rank‑one susceptibility computation.
+- `outputs/threshold/growth_scan.csv`  
+  Growth‑rate scan over κ for Route A (λ̂ with CI).
+- `outputs/threshold/susceptibility.csv`  
+  Spot‑checks of the leading odd eigenvalue for κ (Route B diagnostic).
+
+### Figures (density + dynamics)
+
+The density evolution is now split into two focused 2×2 figures:
+
+- `figs/fig_density_panels.pdf`  
+  **Densities only.** Panels show κ<κ*, κ≈κ*, κ>κ* (aligned), κ>κ* (mixture).  
+  Time is encoded by color (shared Colorbar); no per‑time legend entries.
+
+- `figs/fig_dynamics_panels.pdf`  
+  **Dynamics only.** Panels show M_abs(t)=E|m(t)|, E[m(t)], Var(u_t), and decision diagnostics (decided share + branch imbalance).
+
+- `figs/fig_robustness_panels.pdf` (optional)  
+  Robustness diagnostics (bimodality, overlap, variance, etc.). Not part of the main density figure.
 
 ## Sanity checks
 
@@ -509,6 +590,11 @@ Key files written by the ensemble pipeline:
 - **Above kappa\***: mean_abs(T) > 0 and terminal means bimodal around +/- m*.
 - **Density alignment**: mixture density remains symmetric, aligned density reveals the branch.
 - **Density moments**: integrals are ~1; for below/critical, mu_mix ≈ 0; above kappa*, mu_aligned > 0 at late times.
+- **Scaling exponent**: β is fit in a near‑critical window using Δ = (κ − κ*_B)/κ*_B in [1e‑2, 1e‑1] by default, with sensitivity across windows reported. Do not over‑interpret β if the window lacks equilibrated points.
+- **Scaling regression requirements**: the log–log fit is only reported when **n ≥ 42** valid points are available in-window;
+  otherwise the script expands the window once and exits with a loud error if still insufficient.
+- **Baseline correction**: scaling uses a floor‑corrected amplitude `M_corr = sqrt(max(M_abs^2 − M0^2, 0))`, where `M0` is the median M_abs below κ*_B.
+- **Variance minimum**: reported as `kappa_varmin` (diagnostic only); it is **not** a critical point.
 
 ## YAML configuration reference
 

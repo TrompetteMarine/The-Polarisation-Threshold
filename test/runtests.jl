@@ -56,6 +56,15 @@ end
 
 include("test_welfare_mfc.jl")
 
+# Modular pipeline tests
+include("test_io_utils.jl")
+include("test_order_parameter.jl")
+include("test_scaling_regression.jl")
+include("test_branch_classification.jl")
+include("test_bifurcation_tests.jl")
+include("test_density_analysis.jl")
+include("test_numerical_validation.jl")
+
 # Include bifurcation tests only if available
 if isdefined(Main, :BifurcationKit)
     include("test_bifurcation.jl")
