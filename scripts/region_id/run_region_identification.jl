@@ -199,7 +199,7 @@ function effective_worker_count(opts::ExecutionOptions, n_jobs::Int)
     return min(n_jobs, Threads.nthreads(), max(1, opts.max_threads_outer))
 end
 
-function threaded_collect(jobs::Vector, n_workers::Int, f::Function)
+function threaded_collect(f::Function, jobs::Vector, n_workers::Int)
     out = Vector{Any}(undef, length(jobs))
     if isempty(jobs)
         return out
