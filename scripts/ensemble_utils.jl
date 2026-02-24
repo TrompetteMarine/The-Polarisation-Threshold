@@ -65,14 +65,20 @@ function simulate_snapshots_stats(
     mt_stride::Int,
     store_snapshots::Bool = true,
     track_moments::Bool = true,
+    x_init::Union{Nothing, Vector{Float64}} = nothing,
 )
     Random.seed!(seed)
 
     steps = Int(round(T / dt))
     time_grid = collect(0.0:dt:T)
 
-    # Initial condition: OU stationary variance (no bias)
-    u = randn(N) .* (p.σ / sqrt(2 * p.λ))
+    # Initial condition: OU stationary variance (no bias), unless overridden.
+    u = if x_init === nothing
+        randn(N) .* (p.σ / sqrt(2 * p.λ))
+    else
+        length(x_init) == N || error("x_init length $(length(x_init)) != N=$N")
+        copy(x_init)
+    end
 
     snapshot_indices = [clamp(Int(round(t / dt)) + 1, 1, length(time_grid)) for t in snapshot_times]
     snapshots = store_snapshots ? Vector{Vector{Float64}}(undef, length(snapshot_indices)) :
@@ -140,6 +146,7 @@ function run_ensemble_simulation(
     store_snapshots::Bool = true,
     track_moments::Bool = true,
     parallel::Bool = false,
+    x_init::Union{Nothing, Vector{Float64}} = nothing,
 )
     steps = Int(round(T / dt))
     n_timepoints = Int(floor(steps / mt_stride)) + 1
@@ -169,6 +176,7 @@ function run_ensemble_simulation(
                     mt_stride=mt_stride,
                     store_snapshots=store_snapshots,
                     track_moments=track_moments,
+                    x_init=x_init,
                 )
 
             mean_traj[i, :] .= mt_values
@@ -199,6 +207,7 @@ function run_ensemble_simulation(
                 mt_stride=mt_stride,
                 store_snapshots=store_snapshots,
                 track_moments=track_moments,
+                x_init=x_init,
             )
         end
 
@@ -222,18 +231,19 @@ function run_ensemble_simulation(
     else
         for i in 1:n_ensemble
             snaps, mt_times, mt_values, var_values, skew_values, kurt_values =
-                simulate_snapshots_stats(
-                    p;
-                    kappa=kappa,
-                    N=N,
-                    T=T,
-                    dt=dt,
-                    seed=seeds[i],
-                    snapshot_times=snapshot_times,
-                    mt_stride=mt_stride,
-                    store_snapshots=store_snapshots,
-                    track_moments=track_moments,
-                )
+            simulate_snapshots_stats(
+                p;
+                kappa=kappa,
+                N=N,
+                T=T,
+                dt=dt,
+                seed=seeds[i],
+                snapshot_times=snapshot_times,
+                mt_stride=mt_stride,
+                store_snapshots=store_snapshots,
+                track_moments=track_moments,
+                x_init=x_init,
+            )
 
             mean_traj[i, :] .= mt_values
             var_traj[i, :] .= var_values

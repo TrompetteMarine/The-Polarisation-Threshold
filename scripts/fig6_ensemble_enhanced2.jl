@@ -58,7 +58,7 @@ end
 
 # Model parameters
 lambda = 0.85
-sigma = 0.8
+sigma = 1.15
 theta = 2.0
 c0 = 0.8
 nu0 = 10.6
@@ -93,7 +93,7 @@ n_ensemble_scenarios = if pub_mode;    200
                          end
 n_ensemble_kappa_sweep = if pub_mode;    80
                             elseif deep_mode; 30
-                            else;             10
+                            else;             30
                             end
 n_rep_per_kappa_nearcrit = (pub_mode || deep_mode) ? 3 : 1
 
@@ -131,8 +131,8 @@ density_strict_checks = true
 # Growth-rate fitting windows
 fit_windows = [(10.0, 50.0), (20.0, 80.0), (50.0, 150.0)]
 scaling_amp_floor = 1e-6
-scaling_n_min = 42
-scaling_delta_window_default = (1.0e-2, 5.0e-1)  # wide: captures all post-bifurcation points
+scaling_n_min = 25
+scaling_delta_window_default = (1.0e-2, 1.2e-1)  # valid pitchfork window (avoid saturation)
 scaling_pdec_min = 0.80
 
 # Scenario setup
@@ -161,10 +161,10 @@ mkpath(threshold_dir)
 
 # Route A (empirical growth scan) settings
 growth_scan_enabled = true
-growth_scan_factors = collect(range(0.6, 1.4; length=9))
+growth_scan_factors = collect(range(0.70, 1.30; length=45))
 growth_scan_window = (10.0, 60.0)
-growth_scan_bootstrap = 200
-growth_scan_min_points = 8
+growth_scan_bootstrap = 100
+growth_scan_min_points = 40
 
 # Stage toggles (CLI overrides)
 run_growth_scan = growth_scan_enabled
@@ -196,13 +196,14 @@ if fast_mode
     t_measure = 30.0
     density_bins = 120
     snapshot_times = [0.0, 20.0, 80.0, T]
-    growth_scan_bootstrap = 50
-    growth_scan_factors = collect(range(0.7, 1.3; length=7))
+    growth_scan_bootstrap = 100
+    growth_scan_factors = collect(range(0.70, 1.30; length=25))
+    n_ensemble = max(n_ensemble, 20)  # floor for Route A reliability
 end
 
 if deep_mode && !fast_mode
     @info "DEEP_MODE enabled: finer sweep grid, profile-likelihood, EM robust, BIC window."
-    scaling_n_min    = 20
+    scaling_n_min    = 25
 end
 
 function configure_parallelism(; mode::Symbol = :auto, target_threads::Int = 1, target_workers::Int = 1)
@@ -278,11 +279,11 @@ end
 logmsg("Parallel backend: $(parallel_backend_label()) (nprocs=$(Distributed.nprocs()), threads=$(Threads.nthreads()), parallel_ensemble=$(parallel_ensemble))")
 
 # Output paths
-outdir = "outputs/ensemble_results"
-sweep_dir = "outputs/parameter_sweep"
-stats_dir = "outputs/statistical_tests"
-figdir = "figs"
-docs_dir = "docs"
+outdir       = "outputs/ensemble_results"
+sweep_dir    = "outputs/parameter_sweep"
+stats_dir    = "outputs/statistical_tests"
+figdir       = "figs"
+docs_dir     = "docs"
 snippets_dir = "manuscript_snippets"
 
 mkpath(outdir)
@@ -333,12 +334,12 @@ function compute_edges_from_snapshots(
 end
 
 function histogram_density(data::Vector{Float64}, edges::Vector{Float64})
-    hist = fit(Histogram, data, edges; closed=:left)
-    weights = hist.weights
-    total = sum(weights)
+    hist     = fit(Histogram, data, edges; closed=:left)
+    weights  = hist.weights
+    total    = sum(weights)
     binwidth = edges[2] - edges[1]
-    density = total > 0 ? (weights ./ (total * binwidth)) : fill(0.0, length(weights))
-    centers = midpoints(hist.edges[1])
+    density  = total > 0 ? (weights ./ (total * binwidth)) : fill(0.0, length(weights))
+    centers  = midpoints(hist.edges[1])
     return centers, density
 end
 
@@ -358,10 +359,10 @@ end
 
 function build_A0_operator(p::Params; L::Float64, M::Int, boundary::Symbol = :reflecting)
     @assert isodd(M) "M should be odd so that x=0 is on the grid."
-    x = collect(range(-L, L, length=M))
-    h = x[2] - x[1]
+    x  = collect(range(-L, L, length=M))
+    h  = x[2] - x[1]
     σ2 = p.σ^2 / 2
-    A = zeros(Float64, M, M)
+    A  = zeros(Float64, M, M)
 
     function add_gain!(row::Int, xi::Float64)
         y = xi / p.c0
@@ -384,13 +385,13 @@ function build_A0_operator(p::Params; L::Float64, M::Int, boundary::Symbol = :re
         rate = ν(p.hazard, xi, p.Θ)
 
         # Drift: λ ρ + λ x ρ'
-        A[i, i] += p.λ
+        A[i, i]   += p.λ
         A[i, i-1] += -p.λ * xi / (2h)
         A[i, i+1] += p.λ * xi / (2h)
 
         # Diffusion
         A[i, i-1] += σ2 / h^2
-        A[i, i] += -2σ2 / h^2
+        A[i, i]   += -2σ2 / h^2
         A[i, i+1] += σ2 / h^2
 
         # Reset loss
@@ -532,7 +533,7 @@ function growth_scan_kappa_A(
         res = run_ensemble_simulation(
             p;
             kappa=κ,
-            n_ensemble=n_ensemble,
+            n_ensemble=max(n_ensemble, 30),
             N=N,
             T=T,
             dt=dt,
@@ -719,9 +720,13 @@ end
 function build_dense_sweep_ratios(kappa_star_B::Float64, kappa_star_ref::Float64)
     # 50 log-spaced supercritical δ values in [0.016, 0.50]
     # δ_min=0.016 → T_relax≈τ₀/0.016; with T_max=1200 and τ₀≈50 this is converged.
-    # 50 points ensures ≥42 survive the convergence filter.
+    # 50 points ensures ≥15 survive the convergence filter.
     deltas_above = exp.(range(log(1.6e-2), log(0.50); length=50))
-    deltas_below = [-0.30, -0.20, -0.15, -0.10, -0.064, -0.032, -0.016]
+    # 12 subcritical points: deep tail for stable m0, dense near threshold
+    deltas_below = vcat(
+        range(-0.40, -0.20; length = 5) |> collect,
+        range(-0.18, -0.016; length = 7) |> collect,
+    )
     kappas_above = kappa_star_B .* (1 .+ deltas_above)
     kappas_below = kappa_star_B .* (1 .+ deltas_below)
     kappas_all   = vcat(kappas_below, kappas_above)
@@ -922,8 +927,9 @@ function _fit_em_robust(
     min_points::Int   = 42,
     max_iter::Int     = 200,
     tol::Float64      = 1e-7,
-    σ_out_mult::Float64 = 10.0,  # σ_out = σ_out_mult × σ_in
 )
+    # TODO: Replace standard error with bootstrap to properly account for uncertainty in weights.
+    # The current SE is conditional on estimated weights and underestimates variability.
     δ    = (κ_all .- κ_star) ./ κ_star
     mask = (δ .>= δ_lo) .& (δ .<= δ_hi) .& (δ .> 0) .& (m_all .> amp_floor)
 
@@ -950,7 +956,7 @@ function _fit_em_robust(
     α  = m̄ - β * δ̄
     r  = log_m .- α .- β .* log_δ
     σ²_in  = max(var(r), 1e-6)
-    σ²_out = (σ_out_mult^2) * σ²_in
+    σ²_out = max(σ²_in, 1e-6)
     p_in   = 0.85
     γ      = fill(p_in, n)
     log_lik_prev = -Inf
@@ -976,7 +982,7 @@ function _fit_em_robust(
 
         w_in  = sum(γ);      w_out = sum(1 .- γ)
         σ²_in  = max(dot(γ,   r.^2) / max(w_in,  1e-6), 1e-8)
-        σ²_out = max(dot(1 .- γ, r.^2) / max(w_out, 1e-6), σ²_in * σ_out_mult^2)
+        σ²_out = max(dot(1 .- γ, r.^2) / max(w_out, 1e-6), 1e-8)
         p_in   = clamp(w_in / n, 0.05, 0.99)
 
         # Convergence check on log-likelihood
@@ -994,8 +1000,8 @@ function _fit_em_robust(
     # Profile-likelihood CI for β using inlier weights
     # Weighted versions of sufficient statistics
     W_vec  = γ
-    δ̄_w   = dot(W_vec, log_δ) / sum(W_vec)
-    m̄_w   = dot(W_vec, log_m) / sum(W_vec)
+    δ̄_w    = dot(W_vec, log_δ) / sum(W_vec)
+    m̄_w    = dot(W_vec, log_m) / sum(W_vec)
     Sxx_w  = dot(W_vec, (log_δ .- δ̄_w).^2)
     Syy_w  = dot(W_vec, (log_m .- m̄_w).^2)
     Sxy_w  = dot(W_vec, (log_δ .- δ̄_w) .* (log_m .- m̄_w))
@@ -1038,14 +1044,31 @@ function _consensus_pl_em(r_pl, r_em; α::Float64 = 0.05)
               r_em.p_value > α
 
     n_valid = sum((isfinite(r_pl.beta_hat), isfinite(r_em.beta_hat)))
-    n_agree = pass_pl + pass_em
+    both_valid = n_valid == 2
+    only_pl = n_valid == 1 && isfinite(r_pl.beta_hat)
+    only_em = n_valid == 1 && isfinite(r_em.beta_hat)
 
-    primary = isfinite(r_pl.beta_hat) ? r_pl : r_em
-    overall_pass = n_agree >= 1 && n_valid >= 1
-    verdict = (n_agree == 2) ? "PASS (PL+EM both agree)" :
-              (n_agree == 1 && n_valid == 2) ? "MARGINAL (one of two agrees)" :
-              (n_agree == 1 && n_valid == 1) ? "PASS (single estimator)" :
-              "FAIL (neither estimator agrees)"
+    if both_valid
+        overall_pass = pass_pl && pass_em
+        verdict = overall_pass ? "PASS (PL+EM both agree)" : "FAIL (PL+EM disagree)"
+    elseif only_pl
+        overall_pass = pass_pl
+        verdict = pass_pl ? "PASS (single estimator PL)" : "FAIL (single estimator PL fails)"
+    elseif only_em
+        overall_pass = pass_em
+        verdict = pass_em ? "PASS (single estimator EM)" : "FAIL (single estimator EM fails)"
+    else
+        overall_pass = false
+        verdict = "FAIL (neither estimator valid)"
+    end
+
+    primary = if isfinite(r_pl.beta_hat)
+        r_pl
+    elseif isfinite(r_em.beta_hat)
+        r_em
+    else
+        r_pl
+    end
 
     return (
         beta_hat       = primary.beta_hat,
@@ -1055,7 +1078,7 @@ function _consensus_pl_em(r_pl, r_em; α::Float64 = 0.05)
         pass           = overall_pass,
         verdict        = verdict,
         n_valid        = n_valid,
-        n_agree        = n_agree,
+        n_agree        = (pass_pl + pass_em),
         primary_method = primary.method,
         C              = primary.C,
         kappa_star_eff = hasproperty(primary, :kappa_star_eff) ? primary.kappa_star_eff : NaN,
@@ -1070,33 +1093,39 @@ function _select_bic_window(
     m_all::Vector{Float64},
     se_all::Vector{Float64},
     κ_star::Float64;
-    candidate_windows::Vector{Tuple{Float64, Float64}} = [
-        (1e-2, 5e-2), (1e-2, 1e-1), (5e-3, 1e-1), (1e-2, 2e-1), (5e-3, 2e-1), (2e-2, 1e-1)
-    ],
+    δ_lo_min::Float64 = 5e-3,
+    δ_lo_max::Float64 = 5e-2,
+    δ_hi_min::Float64 = 5e-2,
+    δ_hi_max::Float64 = 5e-1,
+    n_steps::Int = 20,
     amp_floor::Float64 = 1e-8,
 )
-    best_bic    = Inf
-    best_window = candidate_windows[1]
-    best_n      = 0
+    best_bic = Inf
+    best_window = (δ_lo_min, δ_hi_min)
+    best_n = 0
 
-    for (δ_lo, δ_hi) in candidate_windows
-        δ    = (κ_all .- κ_star) ./ κ_star
-        mask = (δ .>= δ_lo) .& (δ .<= δ_hi) .& (δ .> 0) .& (m_all .> amp_floor)
-        log_δ = log.(δ[mask]);  log_m = log.(m_all[mask])
-        fin   = isfinite.(log_δ) .& isfinite.(log_m)
-        n     = sum(fin)
-        if n < scaling_n_min
-            continue
-        end
-        ld = log_δ[fin];  lm = log_m[fin]
-        X  = hcat(ones(n), ld)
-        c  = X \ lm
-        rss = sum((lm .- X * c).^2)
-        bic = n * log(max(rss / n, 1e-300)) + 2 * log(n)
-        if bic < best_bic
-            best_bic    = bic
-            best_window = (δ_lo, δ_hi)
-            best_n      = n
+    δ_lo_grid = range(δ_lo_min, δ_lo_max; length=n_steps)
+    δ_hi_grid = range(δ_hi_min, δ_hi_max; length=n_steps)
+
+    for δ_lo in δ_lo_grid
+        for δ_hi in δ_hi_grid
+            δ_hi <= δ_lo && continue
+            δ = (κ_all .- κ_star) ./ κ_star
+            mask = (δ .>= δ_lo) .& (δ .<= δ_hi) .& (δ .> 0) .& (m_all .> amp_floor)
+            log_δ = log.(δ[mask]);  log_m = log.(m_all[mask])
+            fin = isfinite.(log_δ) .& isfinite.(log_m)
+            n = sum(fin)
+            n < scaling_n_min && continue
+            ld = log_δ[fin];  lm = log_m[fin]
+            X = hcat(ones(n), ld)
+            c = X \ lm
+            rss = sum((lm .- X * c).^2)
+            bic = n * log(max(rss / n, 1e-300)) + 2 * log(n)
+            if bic < best_bic
+                best_bic = bic
+                best_window = (δ_lo, δ_hi)
+                best_n = n
+            end
         end
     end
 
@@ -1194,7 +1223,7 @@ function is_converged(
     time_grid::Vector{Float64},
     series::Vector{Float64};
     frac::Float64 = 0.1,
-    tol_rel::Float64 = convergence_slope_tol,
+    rel_tol::Float64 = 1e-3,
 )
     slope = convergence_slope(time_grid, series; frac=frac)
     if !isfinite(slope)
@@ -1206,7 +1235,7 @@ function is_converged(
         return true
     end
     tail_mean = mean(series[idx])
-    return abs(slope) <= tol_rel * max(tail_mean, 1e-6)
+    return abs(slope) <= rel_tol * max(tail_mean, 1e-6)
 end
 
 function is_valid_variance(V::Float64; max_reasonable::Float64 = 100.0)
@@ -1323,41 +1352,30 @@ This should occur near kappa* where consensus is strongest.
 function estimate_baseline_variance_from_sweep(
     variances::Vector{Float64},
     kappas::Vector{Float64},
-    kappa_star::Float64,
+    kappa_star::Float64;
+    fit_frac::Float64 = 0.3,  # use points within ±30% of kappa_star
 )
-    if isempty(variances) || isempty(kappas)
+    # Fit quadratic: V(κ) = V0 + a*(κ - κ0)^2, with κ0 fixed to kappa_star
+    κ_rel = (kappas .- kappa_star) ./ kappa_star
+    mask = abs.(κ_rel) .<= fit_frac
+    if sum(mask) < 5
+        finite_v = variances[isfinite.(variances)]
         return (
-            V_baseline = NaN,
-            V_baseline_kappa = NaN,
-            V_baseline_ratio = NaN,
-            method = "minimum",
+            V_baseline = minimum(finite_v),
+            V_baseline_kappa = kappas[argmin(finite_v)],
+            V_baseline_ratio = kappas[argmin(finite_v)] / kappa_star,
+            method = "minimum (fallback)",
         )
     end
-
-    finite_idx = findall(isfinite, variances)
-    if isempty(finite_idx)
-        return (
-            V_baseline = NaN,
-            V_baseline_kappa = NaN,
-            V_baseline_ratio = NaN,
-            method = "minimum",
-        )
-    end
-
-    idx_min = finite_idx[argmin(variances[finite_idx])]
-    V_min = variances[idx_min]
-    kappa_at_min = kappas[idx_min]
-    ratio_at_min = kappa_at_min / kappa_star
-
-    if ratio_at_min < 0.5 || ratio_at_min > 1.5
-        @warn "Variance minimum at kappa/kappa* = $(round(ratio_at_min, digits=2)), expected near 1.0"
-    end
-
+    X = [ones(sum(mask)) (κ_rel[mask].^2)]
+    y = variances[mask]
+    coeffs = X \ y
+    V0 = max(coeffs[1], 0.0)
     return (
-        V_baseline = V_min,
-        V_baseline_kappa = kappa_at_min,
-        V_baseline_ratio = ratio_at_min,
-        method = "minimum",
+        V_baseline = V0,
+        V_baseline_kappa = kappa_star,
+        V_baseline_ratio = 1.0,
+        method = "quadratic fit at κ*",
     )
 end
 
@@ -1608,9 +1626,29 @@ Vstar = estimate_Vstar(p; N=N, T=350.0, dt=dt, burn_in=burn_in, seed=seed)
 @printf("V* = %.3f\n", Vstar)
 
 logmsg("Computing theoretical kappa*_B (rank-one susceptibility)")
-kappaB_res = compute_kappa_star_B(p; L=kappaB_L, M=kappaB_M, boundary=kappaB_boundary)
+# Convergence test for theoretical κ*_B
+function converge_kappa_star_B(p; L_init::Float64 = 6.0, M_init::Int = 401, tol::Float64 = 1e-4, max_refine::Int = 5)
+    L = L_init
+    M = M_init
+    kappa_prev = NaN
+    for iter in 1:max_refine
+        res = compute_kappa_star_B(p; L=L, M=M, boundary=:reflecting)
+        kappa = res.kappa_B
+        if isfinite(kappa_prev) && abs(kappa - kappa_prev) / max(abs(kappa), 1e-6) < tol
+            @info "Grid converged at L=$L, M=$M, κ*_B=$kappa"
+            return res
+        end
+        kappa_prev = kappa
+        M = min(2001, M * 2)
+        L = L * 1.5
+    end
+    @warn "Grid did not fully converge; using last computed value."
+    return compute_kappa_star_B(p; L=L, M=M, boundary=:reflecting)
+end
+
+kappaB_res = converge_kappa_star_B(p; L_init=kappaB_L, M_init=kappaB_M)
 kappa_star_B = kappaB_res.kappa_B
-@printf("kappa*_B = %.4f (Phi0=%.4f)\n", kappa_star_B, kappaB_res.Phi0)
+@printf("kappa*_B = %.4f (Phi0=%.4f) after grid convergence\n", kappa_star_B, kappaB_res.Phi0)
 
 kappa_star_A = NaN
 kappa_star_A_ci = (NaN, NaN)
@@ -1946,7 +1984,7 @@ if run_sweep
     logmsg("Running kappa sweep for bifurcation validation [backend=$(parallel_backend_label())]")
     println("Sweep mode: $(sweep_mode) (t_measure = $(t_measure))")
 
-    # Always use the dense near-critical grid — we require ≥42 converged supercritical points.
+    # Always use the dense near-critical grid — we require ≥15 converged supercritical points.
     # Fast mode keeps it fast via small sweep_ensemble (fewer replicas per κ), not fewer κ values.
     sweep_ratios_fine = build_dense_sweep_ratios(kappa_star_B, kappa_star)
     sweep_ratios_fine = filter(r -> r <= sweep_ratio_cap, sweep_ratios_fine)
@@ -2128,9 +2166,21 @@ if run_sweep
     equilibrium_df = DataFrame(equilibrium_rows)
 
     # Baseline correction for finite-size floor in |m|
-    below_mask = (equilibrium_df.kappa .< kappa_star_B) .& .!ismissing.(equilibrium_df.m_abs_star)
-    below_vals = filter(isfinite, equilibrium_df.m_abs_star[below_mask])
-    m0 = isempty(below_vals) ? 0.0 : median(below_vals)
+    # Use only deeply subcritical points (κ < 0.85 κ*_B) for the noise floor.
+    # Points near κ* already show embryonic symmetry-breaking and inflate m₀.
+    deep_mask  = (equilibrium_df.kappa .< 0.85 * kappa_star_B) .&
+                 .!ismissing.(equilibrium_df.m_abs_star)
+    deep_vals  = filter(isfinite, equilibrium_df.m_abs_star[deep_mask])
+    m0 = if isempty(deep_vals)
+        0.0
+    else
+        # Trimmed mean: drop top 10% to guard against rare high-amplitude outliers
+        sv     = sort(deep_vals)
+        n_keep = max(1, floor(Int, 0.9 * length(sv)))
+        mean(sv[1:n_keep])
+    end
+    @printf("[BASELINE] m₀ = %.6f  (%d deep-subcritical points, κ < 0.85 κ*)\n",
+            m0, length(deep_vals))
     equilibrium_df.m_corr_star = sqrt.(max.(equilibrium_df.m_abs_star .^ 2 .- m0^2, 0.0))
     sweep_df.m_corr_star = sqrt.(max.(sweep_df.m_abs_star .^ 2 .- m0^2, 0.0))
 
@@ -2191,21 +2241,14 @@ if run_sweep
             fill(0.05 .* mean(filter(isfinite, equilibrium_df.m_abs_star)), nrow(equilibrium_df))
         m_abs_se_col = max.(m_abs_se_col, 1e-8)
 
-        # Convergence filter: deep mode only.
-        # Fast/standard mode has too few sweep points (T too short for near-critical);
-        # applying the filter there drops to n<3 and returns NaN everywhere.
-        if deep_mode
-            reg_conv_mask = hasproperty(equilibrium_df, :converged) ?
-                BitVector(equilibrium_df.converged .== true) :
-                trues(nrow(equilibrium_df))
-            reg_df  = equilibrium_df[reg_conv_mask, :]
-            se_tmp  = m_abs_se_col[reg_conv_mask]
-            @printf("  Convergence filter: %d/%d sweep points pass\n",
-                    sum(reg_conv_mask), nrow(equilibrium_df))
-        else
-            reg_df  = equilibrium_df
-            se_tmp  = m_abs_se_col
-        end
+        # Convergence filter applied to all runs (relative tolerance)
+        reg_conv_mask = hasproperty(equilibrium_df, :converged) ?
+            BitVector(equilibrium_df.converged .== true) :
+            trues(nrow(equilibrium_df))
+        reg_df  = equilibrium_df[reg_conv_mask, :]
+        se_tmp  = m_abs_se_col[reg_conv_mask]
+        @printf("  Convergence filter: %d/%d sweep points pass\n",
+                sum(reg_conv_mask), nrow(equilibrium_df))
 
         κ_vec  = reg_df.kappa
         m_vec  = reg_df.m_corr_deep
@@ -2221,79 +2264,85 @@ if run_sweep
             win_used = win_default
         end
 
-        end
-
         # ---------------------------------------------------------------------------
-        # Jump detector: detect discontinuous (first-order / subcritical) transitions
-        # before attempting the power-law fit.
-        #
-        # Metric: scan consecutive supercritical points sorted by κ; if any adjacent
-        # pair has |ΔM_corr| / M_corr_prev > jump_ratio_threshold the transition is
-        # flagged as potentially first-order.  We also report the onset κ and jump Δ
-        # regardless of the power-law fit result.
+        # Jump detector: bootstrap-based test for discontinuity
         # ---------------------------------------------------------------------------
-        jump_ratio_threshold = 5.0   # |ΔM| / M_prev > 5× = discontinuous
-        jump_abs_threshold   = 0.10  # |ΔM| > 0.10 absolute (noise guard)
-
-        δ_all_for_jump = (κ_vec .- κ_star_ref) ./ κ_star_ref
-        super_mask_jump = (δ_all_for_jump .> 0) .& (m_vec .> scaling_amp_floor)
-        κ_super = κ_vec[super_mask_jump]
-        m_super = m_vec[super_mask_jump]
-        jump_detected   = false
-        jump_kappa      = NaN
-        jump_delta_M    = NaN
-        jump_ratio_obs  = NaN
-
-        if length(κ_super) >= 2
+        function test_discontinuity(κ_vec, m_vec, κ_star_ref; n_boot=1000)
+            δ_all = (κ_vec .- κ_star_ref) ./ κ_star_ref
+            super_mask = (δ_all .> 0) .& (m_vec .> scaling_amp_floor)
+            κ_super = κ_vec[super_mask]
+            m_super = m_vec[super_mask]
+            if length(κ_super) < 3
+                return (jump_detected=false, jump_kappa=NaN, jump_delta_M=NaN, jump_ratio=NaN, p_value=NaN)
+            end
             sort_idx = sortperm(κ_super)
-            κ_s = κ_super[sort_idx];  m_s = m_super[sort_idx]
-            dM   = abs.(diff(m_s))
+            κ_s = κ_super[sort_idx]; m_s = m_super[sort_idx]
+            dM = abs.(diff(m_s))
             Mprev = m_s[1:end-1]
             ratios = dM ./ max.(Mprev, 1e-8)
-            max_ratio_idx = argmax(ratios)
-            if ratios[max_ratio_idx] > jump_ratio_threshold && dM[max_ratio_idx] > jump_abs_threshold
-                jump_detected  = true
-                jump_kappa     = κ_s[max_ratio_idx + 1]   # κ at which jump arrives
-                jump_delta_M   = dM[max_ratio_idx]
-                jump_ratio_obs = ratios[max_ratio_idx]
+            obs_max_ratio = maximum(ratios)
+
+            # Fit continuous power law (log-log)
+            log_δ = log.(δ_all[super_mask])
+            log_m = log.(m_s)
+            X = hcat(ones(length(log_δ)), log_δ)
+            coeffs = X \ log_m
+            fitted = exp.(X * coeffs)
+            residuals = m_s - fitted
+
+            boot_ratios = Float64[]
+            for b in 1:n_boot
+                m_boot = fitted + sample(residuals, length(residuals), replace=true)
+                m_boot = max.(m_boot, 1e-8)
+                dM_boot = abs.(diff(m_boot))
+                Mprev_boot = m_boot[1:end-1]
+                ratios_boot = dM_boot ./ max.(Mprev_boot, 1e-8)
+                push!(boot_ratios, maximum(ratios_boot))
             end
+            p_value = mean(boot_ratios .>= obs_max_ratio)
+            jump_detected = p_value < 0.05
+            if jump_detected
+                max_ratio_idx = argmax(ratios)
+                jump_kappa = κ_s[max_ratio_idx + 1]
+                jump_delta_M = dM[max_ratio_idx]
+                jump_ratio = ratios[max_ratio_idx]
+            else
+                jump_kappa = NaN
+                jump_delta_M = NaN
+                jump_ratio = NaN
+            end
+            return (jump_detected=jump_detected, jump_kappa=jump_kappa,
+                    jump_delta_M=jump_delta_M, jump_ratio=jump_ratio, p_value=p_value)
         end
 
-        if jump_detected
+        jump_test = test_discontinuity(κ_vec, m_vec, κ_star_ref)
+        if jump_test.jump_detected
             println()
             println("  ┌─────────────────────────────────────────────────────────────")
             println("  │  ⚠  DISCONTINUOUS JUMP DETECTED — possible subcritical bifurcation")
             @printf("  │  κ_jump ≈ %.4f  (%.1f%% above κ*_ref)\n",
-                    jump_kappa, 100*(jump_kappa/κ_star_ref - 1))
+                    jump_test.jump_kappa, 100*(jump_test.jump_kappa/κ_star_ref - 1))
             @printf("  │  |ΔM*| = %.3f  (×%.1f of previous M*)\n",
-                    jump_delta_M, jump_ratio_obs)
+                    jump_test.jump_delta_M, jump_test.jump_ratio)
+            @printf("  │  Bootstrap p-value = %.3f\n", jump_test.p_value)
             println("  │")
-            println("  │  Physics interpretation:")
-            println("  │    κ*_ref ≈ linear instability threshold (E[m]→0 growth rate = 0)")
-            println("  │    κ_jump ≈ saddle-node on ordered branch (M* suddenly non-zero)")
-            @printf("  │    Bistable window: κ ∈ [%.4f, %.4f]  (width=%.4f)\n",
-                    κ_star_ref, jump_kappa, jump_kappa - κ_star_ref)
-            println("  │")
-            println("  │  The power-law β=0.5 test DOES NOT APPLY to a first-order transition.")
-            println("  │  M* ~ (κ−κ*)^β holds only for continuous (supercritical) bifurcations.")
-            println("  │  See the jump diagnostics CSV for onset κ and Δ.")
+            println("  │  The power-law β=0.5 test does not apply.")
             println("  └─────────────────────────────────────────────────────────────")
             println()
-
-            # Write jump diagnostics
             jump_diag = DataFrame(
                 kappa_ref          = [κ_star_ref],
-                kappa_jump         = [jump_kappa],
-                jump_delta_M       = [jump_delta_M],
-                jump_ratio         = [jump_ratio_obs],
-                bistable_width     = [jump_kappa - κ_star_ref],
+                kappa_jump         = [jump_test.jump_kappa],
+                jump_delta_M       = [jump_test.jump_delta_M],
+                jump_ratio         = [jump_test.jump_ratio],
+                p_value            = [jump_test.p_value],
+                bistable_width     = [jump_test.jump_kappa - κ_star_ref],
                 kappa_B_theory     = [kappa_star_B],
                 transition_type    = ["subcritical_candidate"],
             )
             CSV.write(joinpath(sweep_dir, "jump_diagnostics.csv"), jump_diag)
         end
 
-        # --- Step 1: Profile-likelihood (finds κ*_eff and β via BIC grid) ---
+        # --- Step 1: Profile-likelihood with bootstrap CI for β (accounting for κ* uncertainty) ---
         @printf("  Minimum required points: %d\n", scaling_n_min)
         # Search range: [0.75·κ*_ref, 1.25·κ*_ref] unconstrained.
         # The CI on κ*_A must NOT shrink pl_hi — the CI upper bound can sit well below
@@ -2303,13 +2352,49 @@ if run_sweep
         pl_hi = max(κ_star_ref, kappa_star_B) * 1.25
         @printf("  PL search: κ*∈[%.4f, %.4f]  (κ*_ref=%.4f, κ*_B=%.4f)\n",
                 pl_lo, pl_hi, κ_star_ref, kappa_star_B)
+
+        function bootstrap_scaling(κ_vec, m_vec, se_vec, κ_star_ref, win_used, pl_lo, pl_hi; n_boot::Int = 500)
+            β_boot = Float64[]
+            for b in 1:n_boot
+                idx = sample(1:length(κ_vec), length(κ_vec), replace=true)
+                κ_boot = κ_vec[idx]
+                m_boot = m_vec[idx]
+                se_boot = se_vec[idx]
+                r = _fit_profile_likelihood(
+                    κ_boot, m_boot, se_boot;
+                    δ_lo=win_used[1], δ_hi=win_used[2],
+                    κ_lo=pl_lo, κ_hi=pl_hi, n_κ=120,
+                    amp_floor=scaling_amp_floor,
+                )
+                if isfinite(r.beta_hat)
+                    push!(β_boot, r.beta_hat)
+                end
+            end
+            if length(β_boot) < 100
+                return (beta_ci=(NaN, NaN), beta_hat=NaN, beta_se=NaN)
+            end
+            beta_ci = (quantile(β_boot, 0.025), quantile(β_boot, 0.975))
+            beta_hat = mean(β_boot)
+            beta_se = std(β_boot)
+            return (beta_ci=beta_ci, beta_hat=beta_hat, beta_se=beta_se)
+        end
+
+        boot_pl = bootstrap_scaling(κ_vec, m_vec, se_vec, κ_star_ref, win_used, pl_lo, pl_hi; n_boot=500)
         r_pl = _fit_profile_likelihood(
             κ_vec, m_vec, se_vec;
             δ_lo=win_used[1], δ_hi=win_used[2],
             κ_lo=pl_lo, κ_hi=pl_hi, n_κ=120,
             amp_floor=scaling_amp_floor,
         )
-        @printf("  Profile-likeli : β=%.4f ± %.4f  CI=[%.4f,%.4f]  κ*_eff=%.4f  n=%d\n",
+        pl_label = "bootstrap CI"
+        if isfinite(boot_pl.beta_hat)
+            r_pl = merge(r_pl, (beta_ci=boot_pl.beta_ci, beta_hat=boot_pl.beta_hat, beta_se=boot_pl.beta_se))
+        else
+            pl_label = "profile CI (bootstrap failed)"
+        end
+
+        @printf("  Profile-likeli (%s): β=%.4f ± %.4f  CI=[%.4f,%.4f]  κ*_eff=%.4f  n=%d\n",
+                pl_label,
                 r_pl.beta_hat, r_pl.beta_se,
                 r_pl.beta_ci[1], r_pl.beta_ci[2],
                 r_pl.kappa_star_eff, r_pl.n_points)
@@ -2387,6 +2472,7 @@ if run_sweep
             push!(sc_rows, (
                 kappa = equilibrium_df.kappa[i],
                 delta_rel = δ_all[i],
+                delta = δ_all[i],
                 delta_abs = equilibrium_df.kappa[i] - κ_star_ref,
                 m_abs_star = equilibrium_df.m_abs_star[i],
                 m_abs_ci = hasproperty(equilibrium_df, :m_abs_ci_lower) ?
@@ -2454,7 +2540,7 @@ if run_sweep
     # If BeliefSim's run_ensemble_simulation does not yet accept x_init, replace
     # base_seed=seed+10000 with base_seed=seed+20000 and note that the test is still
     # the weaker "same-distribution" comparison (both branches start disordered).
-    use_ordered_init = false  # set true once BeliefSim exposes x_init kwarg
+    use_ordered_init = true  # now implemented
     ordered_x0 = ones(N)     # all agents fully polarised → ordered branch
 
     for (idx, ratio) in enumerate(reverse(sweep_ratios_fine))
@@ -2641,12 +2727,13 @@ if run_sweep
         println(io, "kappa_at_min = $V_baseline_kappa")
         println(io, "kappa_ratio_at_min = $V_baseline_ratio")
     end
+end
 
-    # =============================================================================
-    # FIGURES
-    # =============================================================================
+# =============================================================================
+# FIGURES
+# =============================================================================
 
-    println("\nGenerating figures...")
+println("\nGenerating figures...")
 logmsg("Generating figures and exporting density snapshots")
 edges = compute_edges_from_snapshots(results; bins=density_bins)
 density_data = Dict{String, DensitySummary}()

@@ -1,0 +1,97 @@
+outputs:
+  dir: "outputs/region_id"
+
+params:
+  lambda: 0.85
+  sigma: 0.80
+  theta: 2.00
+  c0: 0.80
+  eta: 0.0
+  ordered_value: 1.0
+
+grid:
+  dt: [1.0e-2, 5.0e-3]
+  N: [5000, 10000]
+  impl: ["first_crossing", "interp"]
+  seeds: 10
+  seed_base: 0
+
+runtime:
+  burn_in: "150/lambda"
+  sample: "250/lambda"
+  mt_stride: 5
+  growth_scan:
+    epsilon: 0.01
+    window: [10.0, 50.0]
+    kappa_min_factor: 0.70
+    kappa_max_factor: 1.30
+    grid_points: 15
+    n_boot: 100
+  kappa_scan:
+    coarse_delta:
+      min: -0.05
+      max: 0.25
+      step: 0.01
+    refined_delta:
+      min: -0.01
+      max: 0.06
+      step: 0.002
+    tc_refined_delta:
+      min: 0.002
+      max: 0.03
+      step: 0.001
+  stationarity:
+    blocks: 5
+    sigma: 2.5
+  beta_fit:
+    windows:
+      wide: [0.01, 0.12]
+      mid: [0.005, 0.05]
+      tight: [0.002, 0.03]
+    min_points: 10
+    min_R2: 0.985
+    max_se_beta: 0.05
+    stability_tol: 0.06
+  alpha_fit:
+    N_values: [1000, 3000, 10000, 30000, 100000]
+    min_points: 5
+    min_R2: 0.98
+    max_se_alpha: 0.05
+  psd_peak:
+    min_omega_factor: 0.2
+    prominence_ratio: 10.0
+    dc_dominance_ratio: 5.0
+    seed_coherence_cv: 0.15
+
+thresholds:
+  noise_floor:
+    reference_delta: -0.05
+    min_effect_on_top: 0.02
+    min_points: 3
+  jump_detector:
+    ci_sigma: 3.0
+    min_jump_size: 0.05
+  hysteresis:
+    ci_sigma: 3.0
+    min_gap: 0.04
+    width_min_rel: 0.005
+  beta_fit:
+    min_points: 10
+    min_r2: 0.985
+    max_se: 0.05
+    stability_tol: 0.06
+    beta_I: [0.45, 0.55]
+    beta_TC_tight: [0.20, 0.30]
+    beta_TC_wide: [0.30, 0.45]
+  alpha_fit:
+    min_points: 5
+    min_r2: 0.98
+    max_se: 0.05
+    band_I: [0.40, 0.60]
+    band_TC: [0.18, 0.32]
+    band_III: [0.00, 0.12]
+  psd_peak:
+    min_omega_factor: 0.2
+    prominence_ratio: 10.0
+    dc_ratio: 5.0
+    cv_max: 0.15

@@ -873,8 +873,32 @@ function compute_b_cubic(
     params::Params;
     b_default::Float64 = 0.5
 )
-    # For now, use calibrated default
-    # TODO: Implement Dirichlet-form computation from PhylogeneticDiagram.jl
+    # Try spectral computation; fall back to b_default on any failure.
+    cb_path = joinpath(@__DIR__, "bifurcation", "CubicCoefficient.jl")
+    if isfile(cb_path) && !isdefined(@__MODULE__, :CubicCoefficient)
+        include(cb_path)
+    end
+    if isdefined(@__MODULE__, :CubicCoefficient)
+        nu0 = if hasproperty(params.hazard, :ν0)
+            params.hazard.ν0
+        elseif hasproperty(params.hazard, :nu0)
+            params.hazard.nu0
+        else
+            NaN
+        end
+        if isfinite(nu0)
+            b_spec = try
+                CubicCoefficient.compute_b_cubic_spectral(
+                    V, params.λ, params.σ, params.Θ, params.c0, nu0
+                )
+            catch e
+                @debug "compute_b_cubic spectral path failed" exception = e
+                NaN
+            end
+            (isfinite(b_spec) && b_spec > 0.0) && return b_spec
+        end
+    end
+    @debug "compute_b_cubic: using fallback b_default=$(b_default)"
     return b_default
 end
 """

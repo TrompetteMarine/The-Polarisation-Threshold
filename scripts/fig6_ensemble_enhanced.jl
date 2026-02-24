@@ -93,7 +93,7 @@ n_ensemble_scenarios = if pub_mode;    200
                          end
 n_ensemble_kappa_sweep = if pub_mode;    80
                             elseif deep_mode; 30
-                            else;             10
+                            else;             30
                             end
 n_rep_per_kappa_nearcrit = (pub_mode || deep_mode) ? 3 : 1
 
@@ -135,11 +135,21 @@ density_strict_checks = true
 fit_windows = [(10.0, 50.0), (20.0, 80.0), (50.0, 150.0)]
 scaling_delta_windows = [(1e-2, 5e-2), (1e-2, 1e-1), (5e-3, 2e-1)]
 scaling_amp_floor = 1e-6
-scaling_n_min = 42
-scaling_n_target = 72
-scaling_delta_window_default = (1.0e-2, 1.0e-1)
+scaling_n_min = 15
+scaling_n_target = 30
+scaling_delta_window_default = (1.0e-2, 1.2e-1)
 scaling_allow_window_expand = true
-scaling_max_window_expand = (5.0e-3, 2.0e-1)
+scaling_max_window_expand = (5.0e-3, 1.5e-1)
+# Sync guard: ensure config.jl constants match this script's settings.
+const _CONFIG_LOADED_ = Ref(false)  # sentinel to avoid repeated config.jl include
+let _cfg_path = joinpath(@__DIR__, "config.jl")
+    if isfile(_cfg_path) && !_CONFIG_LOADED_[]
+        include(_cfg_path)
+        _CONFIG_LOADED_[] = true
+        @assert Config.SCALING_N_MIN == scaling_n_min "BUG: scaling_n_min mismatch — config.jl vs fig6"
+        @assert abs(Config.SCALING_WINDOW_MAX - scaling_delta_window_default[2]) < 1e-9 "BUG: scaling window upper bound mismatch — config.jl vs fig6"
+    end
+end
 scaling_saturation_filter = true
 scaling_saturation_cutoff_quantile = 0.85
 scaling_convergence_gate = true
@@ -172,9 +182,9 @@ mkpath(threshold_dir)
 
 # Route A (empirical growth scan) settings
 growth_scan_enabled = true
-growth_scan_factors = collect(range(0.6, 1.4; length=9))
+growth_scan_factors = collect(range(0.70, 1.30; length=15))
 growth_scan_window = (10.0, 60.0)
-growth_scan_bootstrap = 200
+growth_scan_bootstrap = 100
 growth_scan_min_points = 8
 
 # Stage toggles (CLI overrides)
@@ -207,14 +217,15 @@ if fast_mode
     t_measure = 30.0
     density_bins = 120
     snapshot_times = [0.0, 20.0, 80.0, T]
-    growth_scan_bootstrap = 50
-    growth_scan_factors = collect(range(0.7, 1.3; length=7))
+    growth_scan_bootstrap = 100
+    growth_scan_factors = collect(range(0.70, 1.30; length=15))
+    n_ensemble = max(n_ensemble, 20)  # floor for Route A reliability
 end
 
 if deep_mode && !fast_mode
     @info "DEEP_MODE enabled: finer sweep grid, profile-likelihood, WLS, Cook's D, BIC window."
-    scaling_n_min    = 20
-    scaling_n_target = 50
+    scaling_n_min    = 15
+    scaling_n_target = 30
 end
 
 function configure_parallelism(; mode::Symbol = :auto, target_threads::Int = 1, target_workers::Int = 1)
@@ -544,7 +555,7 @@ function growth_scan_kappa_A(
         res = run_ensemble_simulation(
             p;
             kappa=κ,
-            n_ensemble=n_ensemble,
+            n_ensemble=max(n_ensemble, 30),
             N=N,
             T=T,
             dt=dt,
@@ -736,8 +747,15 @@ function get_adaptive_T(ratio::Float64, base_T::Float64)
 end
 
 function build_dense_sweep_ratios(kappa_star_B::Float64, kappa_star_ref::Float64)
-    deltas_above = [1.6e-2, 3.2e-2, 6.4e-2, 1e-1, 0.15, 0.20, 0.25, 0.30]
-    deltas_below = [-1e-1, -6.4e-2, -3.2e-2, -1.6e-2, -8e-3, -4e-3]
+    # 60 points in the valid pitchfork window; 20 diagnostic points beyond
+    deltas_core  = exp.(range(log(5.0e-3), log(1.5e-1); length=60))
+    deltas_tail  = exp.(range(log(1.6e-1), log(5.0e-1); length=20))
+    deltas_above = vcat(deltas_core, deltas_tail)
+    # 12 subcritical points: deep tail for stable m0, dense near threshold
+    deltas_below = vcat(
+        range(-0.40, -0.20; length = 5) |> collect,
+        range(-0.18, -0.016; length = 7) |> collect,
+    )
     kappas_near = kappa_star_B .* (1 .+ vcat(deltas_below, deltas_above))
     ratios_near = kappas_near ./ kappa_star_ref
 
@@ -1236,7 +1254,7 @@ function _select_bic_window(
     se_all::Vector{Float64},
     κ_star::Float64;
     candidate_windows::Vector{Tuple{Float64, Float64}} = [
-        (1e-2, 5e-2), (1e-2, 1e-1), (5e-3, 1e-1), (1e-2, 2e-1), (5e-3, 2e-1), (2e-2, 1e-1)
+        (1e-2, 5e-2), (1e-2, 1e-1), (5e-3, 1e-1), (1e-2, 1.5e-1), (5e-3, 1.5e-1), (2e-2, 1e-1)
     ],
     amp_floor::Float64 = 1e-8,
 )
@@ -2757,9 +2775,21 @@ if run_sweep
     equilibrium_df = DataFrame(equilibrium_rows)
 
     # Baseline correction for finite-size floor in |m|
-    below_mask = (equilibrium_df.kappa .< kappa_star_B) .& .!ismissing.(equilibrium_df.m_abs_star)
-    below_vals = filter(isfinite, equilibrium_df.m_abs_star[below_mask])
-    m0 = isempty(below_vals) ? 0.0 : median(below_vals)
+    # Use only deeply subcritical points (κ < 0.85 κ*_B) for the noise floor.
+    # Points near κ* already show embryonic symmetry-breaking and inflate m₀.
+    deep_mask  = (equilibrium_df.kappa .< 0.85 * kappa_star_B) .&
+                 .!ismissing.(equilibrium_df.m_abs_star)
+    deep_vals  = filter(isfinite, equilibrium_df.m_abs_star[deep_mask])
+    m0 = if isempty(deep_vals)
+        0.0
+    else
+        # Trimmed mean: drop top 10% to guard against rare high-amplitude outliers
+        sv     = sort(deep_vals)
+        n_keep = max(1, floor(Int, 0.9 * length(sv)))
+        mean(sv[1:n_keep])
+    end
+    @printf("[BASELINE] m₀ = %.6f  (%d deep-subcritical points, κ < 0.85 κ*)\n",
+            m0, length(deep_vals))
     equilibrium_df.m_corr_star = sqrt.(max.(equilibrium_df.m_abs_star .^ 2 .- m0^2, 0.0))
     sweep_df.m_corr_star = sqrt.(max.(sweep_df.m_abs_star .^ 2 .- m0^2, 0.0))
 
@@ -2990,6 +3020,7 @@ if run_sweep
             push!(sc_rows, (
                 kappa = equilibrium_df.kappa[i],
                 delta_rel = δ_all[i],
+                delta = δ_all[i],
                 delta_abs = equilibrium_df.kappa[i] - κ_star_ref,
                 m_abs_star = equilibrium_df.m_abs_star[i],
                 m_abs_ci = hasproperty(equilibrium_df, :m_abs_ci_lower) ?

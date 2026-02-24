@@ -303,7 +303,16 @@ function growth_scan(
         end
     end
 
-    return slopes, boot_slopes
+    boot_kappa = Float64[]
+    if n_boot > 0 && size(boot_slopes, 1) > 0
+        sizehint!(boot_kappa, size(boot_slopes, 1))
+        for b in 1:size(boot_slopes, 1)
+            ks = estimate_kappa_star_from_scan(kappa_grid, boot_slopes[b, :])
+            push!(boot_kappa, ks)
+        end
+    end
+
+    return slopes, boot_slopes, boot_kappa
 end
 
 function kappa_star_from_growth(
@@ -322,7 +331,7 @@ function kappa_star_from_growth(
     bisection_iters::Int,
     bisection_tol::Float64,
 )
-    slopes, boot_slopes = growth_scan(
+    slopes, boot_slopes, boot_kappa = growth_scan(
         p,
         kappa_grid;
         N=N,
@@ -366,7 +375,7 @@ function kappa_star_from_growth(
     if !isfinite(k_low) || !isfinite(k_high)
         status = "no_bracket"
     else
-        for _ in 1:bisection_iters
+        for iter in 1:bisection_iters
             if abs(k_high - k_low) < bisection_tol
                 break
             end
@@ -378,7 +387,7 @@ function kappa_star_from_growth(
                 T=T,
                 dt=dt,
                 n_ensemble=n_ensemble,
-                seed_base=seed_base + 777,
+                seed_base=seed_base + 777 + iter * 1000,
                 impl=impl,
                 mt_stride=mt_stride,
                 init_mode=:odd,
@@ -405,17 +414,11 @@ function kappa_star_from_growth(
     end
 
     kappa_se = NaN
-    if n_boot > 0 && size(boot_slopes, 1) > 0
-        boot_kappa = Float64[]
-        sizehint!(boot_kappa, size(boot_slopes, 1))
-        for b in 1:size(boot_slopes, 1)
-            k_b = estimate_kappa_star_from_scan(kappa_grid, boot_slopes[b, :])
-            push!(boot_kappa, k_b)
-        end
+    if n_boot > 0 && !isempty(boot_kappa)
         kappa_se = std(boot_kappa)
     end
 
-    return (kappa_star=kappa_star, kappa_se=kappa_se, slopes=slopes, status=status)
+    return (kappa_star=kappa_star, kappa_se=kappa_se, slopes=slopes, boot_kappa=boot_kappa, status=status)
 end
 
 function sample_skew_kurt(x::Vector{Float64})
@@ -451,6 +454,285 @@ function bimodality_coeff(skew::Float64, kurt::Float64, n::Int)
     end
     correction = 3 * (n - 1)^2 / ((n - 2) * (n - 3))
     return (skew^2 + 1) / (kurt + correction)
+end
+
+# Adaptive simulation time to mitigate critical slowing down
+function adaptive_T(kappa::Float64, kappa_star::Float64, T_base::Float64, T_max::Float64, tau0::Float64)
+    delta = abs(kappa / kappa_star - 1.0)
+    if delta < 1e-8
+        return T_max
+    end
+    T_adapt = T_base * max(1.0, tau0 / delta)
+    return min(T_max, T_adapt)
+end
+
+# Check if the ensemble mean of |m| has reached a plateau
+function is_ensemble_converged(mean_abs_traj::Vector{Float64}, time_grid::Vector{Float64}, frac::Float64 = 0.2)
+    n = length(mean_abs_traj)
+    if n < 10
+        return false
+    end
+    late_start = max(1, Int(floor((1 - frac) * n)))
+    tail_half = max(1, Int(floor(n * frac / 2)))
+    early_late = mean_abs_traj[late_start:max(late_start, n - tail_half)]
+    late_late = mean_abs_traj[max(1, n - tail_half + 1):n]
+    if length(early_late) < 3 || length(late_late) < 3
+        return true
+    end
+    mean_early = mean(early_late)
+    mean_late = mean(late_late)
+    rel_diff = abs(mean_late - mean_early) / (abs(mean_early) + 1e-6)
+    return rel_diff < 0.05
+end
+
+# Estimate m0 from deeply subcritical simulations (e.g., kappa = 0.5 * kappa*_theory)
+function estimate_m0(
+    p::Params;
+    kappa_frac::Float64 = 0.5,
+    N::Int,
+    T::Float64,
+    dt::Float64,
+    n_ensemble::Int,
+    seed_base::Int,
+    impl::Symbol,
+    mt_stride::Int,
+    epsilon::Float64,
+    late_window_frac::Float64,
+    convergence_frac::Float64,
+    n_boot::Int = 200,
+)
+    kappa_theory = critical_kappa(p)
+    kappa0 = kappa_frac * kappa_theory
+    res = run_ensemble(
+        p;
+        kappa=kappa0,
+        N=N,
+        T=T,
+        dt=dt,
+        n_ensemble=n_ensemble,
+        seed_base=seed_base + 50000,
+        impl=impl,
+        mt_stride=mt_stride,
+        init_mode=:random,
+        epsilon=epsilon,
+    )
+    n_time = size(res.mean_traj, 2)
+    late_start = max(1, Int(floor((1 - late_window_frac) * n_time)))
+    mbar = Float64[]
+    for j in 1:n_ensemble
+        abs_traj = abs.(res.mean_traj[j, :])
+        if is_ensemble_converged(abs_traj, res.time_grid, convergence_frac)
+            push!(mbar, mean(abs_traj[late_start:end]))
+        end
+    end
+    if isempty(mbar)
+        mbar = [mean(abs.(res.mean_traj[j, late_start:end])) for j in 1:n_ensemble]
+    end
+    m0 = mean(mbar)
+    boot_m0 = Float64[]
+    sizehint!(boot_m0, n_boot)
+    for _ in 1:n_boot
+        idx = rand(1:length(mbar), length(mbar))
+        push!(boot_m0, mean(mbar[idx]))
+    end
+    m0_se = std(boot_m0)
+    return m0, m0_se, mbar
+end
+
+# Select delta window by minimizing BIC over a grid of (delta_lo, delta_hi)
+function select_delta_window(
+    kappas::Vector{Float64},
+    amps::Vector{Float64},
+    kappa_star::Float64;
+    delta_min::Float64 = 1e-2,
+    delta_max::Float64 = 0.5,
+    n_steps::Int = 20,
+    min_points::Int = 5,
+)
+    delta = (kappas .- kappa_star) ./ kappa_star
+    delta_grid_lo = exp.(range(log(delta_min), log(delta_max); length=n_steps))
+    delta_grid_hi = exp.(range(log(delta_min), log(delta_max); length=n_steps))
+    best_bic = Inf
+    best_window = (delta_min, delta_max)
+    best_n = 0
+    for delta_lo in delta_grid_lo
+        for delta_hi in delta_grid_hi
+            delta_hi <= delta_lo && continue
+            mask = (delta .>= delta_lo) .& (delta .<= delta_hi) .& (amps .> 0) .& isfinite.(amps)
+            if sum(mask) < min_points
+                continue
+            end
+            x = log.(delta[mask])
+            y = log.(amps[mask])
+            X = hcat(ones(length(x)), x)
+            coeffs = X \ y
+            rss = sum((y .- X * coeffs).^2)
+            n = length(x)
+            bic = n * log(rss / n) + 2 * log(n)
+            if bic < best_bic
+                best_bic = bic
+                best_window = (delta_lo, delta_hi)
+                best_n = n
+            end
+        end
+    end
+    return best_window, best_n, best_bic
+end
+
+# Theil-Sen robust slope (median of pairwise slopes)
+function theil_sen_slope(x::Vector{Float64}, y::Vector{Float64})
+    n = length(x)
+    slopes = Float64[]
+    sizehint!(slopes, div(n * (n - 1), 2))
+    for i in 1:n
+        for j in (i + 1):n
+            if x[i] != x[j]
+                push!(slopes, (y[j] - y[i]) / (x[j] - x[i]))
+            end
+        end
+    end
+    return isempty(slopes) ? NaN : median(slopes)
+end
+
+# Nested bootstrap for beta that resamples kappa*, per-kappa runs, and re-selects delta window
+function bootstrap_beta_nested(
+    kappas::Vector{Float64},
+    per_kappa_samples::Vector{Vector{Float64}},
+    m0::Float64,
+    kappa_star_boot::Vector{Float64},
+    delta_range::Tuple{Float64,Float64};
+    n_outer::Int = 200,
+    delta_steps::Int = 20,
+    min_points::Int = 5,
+)
+    n_kappa = length(kappas)
+    if n_kappa == 0 || isempty(kappa_star_boot)
+        return (beta_hat=NaN, beta_se=NaN, beta_ci=(NaN, NaN),
+                theil_sen=NaN, theil_ci=(NaN, NaN), n_boot=0)
+    end
+
+    function fit_beta_window(kappa_vals, samples, kappa_star_ref)
+        M_corr = Float64[]
+        kappa_valid = Float64[]
+        for i in eachindex(kappa_vals)
+            runs = samples[i]
+            isempty(runs) && continue
+            mbar = mean(runs)
+            m_corr = sqrt(max(mbar^2 - m0^2, 0.0))
+            if m_corr > 1e-8
+                push!(M_corr, m_corr)
+                push!(kappa_valid, kappa_vals[i])
+            end
+        end
+        if length(kappa_valid) < min_points
+            return (beta_hat=NaN, window=(NaN, NaN), n_points=0, x=Float64[], y=Float64[])
+        end
+        win, _, _ = select_delta_window(
+            kappa_valid, M_corr, kappa_star_ref;
+            delta_min=delta_range[1], delta_max=delta_range[2],
+            n_steps=delta_steps, min_points=min_points,
+        )
+        delta = (kappa_valid .- kappa_star_ref) ./ kappa_star_ref
+        mask = (delta .>= win[1]) .& (delta .<= win[2]) .& (M_corr .> 0)
+        if sum(mask) < min_points
+            return (beta_hat=NaN, window=win, n_points=sum(mask), x=Float64[], y=Float64[])
+        end
+        x = log.(delta[mask])
+        y = log.(M_corr[mask])
+        X = hcat(ones(length(x)), x)
+        coeffs = X \ y
+        return (beta_hat=coeffs[2], window=win, n_points=length(x), x=x, y=y)
+    end
+
+    # Baseline estimate for BCa
+    kappa_star_ref = median(kappa_star_boot)
+    fit0 = fit_beta_window(kappas, per_kappa_samples, kappa_star_ref)
+    beta_hat0 = fit0.beta_hat
+
+    # Jackknife for acceleration (leave-one-kappa out)
+    jack = Float64[]
+    sizehint!(jack, n_kappa)
+    for i in 1:n_kappa
+        kappa_j = [kappas[j] for j in 1:n_kappa if j != i]
+        s_j = [per_kappa_samples[j] for j in 1:n_kappa if j != i]
+        fit_j = fit_beta_window(kappa_j, s_j, kappa_star_ref)
+        isfinite(fit_j.beta_hat) && push!(jack, fit_j.beta_hat)
+    end
+
+    # Nested bootstrap
+    boot_beta = Float64[]
+    boot_theil = Float64[]
+    sizehint!(boot_beta, n_outer)
+    sizehint!(boot_theil, n_outer)
+    for _ in 1:n_outer
+        kappa_s = kappa_star_boot[rand(1:length(kappa_star_boot))]
+        M_corr = Float64[]
+        kappa_valid = Float64[]
+        for i in 1:n_kappa
+            runs = per_kappa_samples[i]
+            isempty(runs) && continue
+            idx = rand(1:length(runs), length(runs))
+            mbar_b = mean(runs[idx])
+            m_corr = sqrt(max(mbar_b^2 - m0^2, 0.0))
+            if m_corr > 1e-8
+                push!(M_corr, m_corr)
+                push!(kappa_valid, kappas[i])
+            end
+        end
+        if length(kappa_valid) < min_points
+            continue
+        end
+        win, _, _ = select_delta_window(
+            kappa_valid, M_corr, kappa_s;
+            delta_min=delta_range[1], delta_max=delta_range[2],
+            n_steps=delta_steps, min_points=min_points,
+        )
+        delta = (kappa_valid .- kappa_s) ./ kappa_s
+        mask = (delta .>= win[1]) .& (delta .<= win[2]) .& (M_corr .> 0)
+        if sum(mask) < min_points
+            continue
+        end
+        x = log.(delta[mask])
+        y = log.(M_corr[mask])
+        X = hcat(ones(length(x)), x)
+        coeffs = X \ y
+        push!(boot_beta, coeffs[2])
+        push!(boot_theil, theil_sen_slope(x, y))
+    end
+
+    beta_ci = (NaN, NaN)
+    theil_ci = (NaN, NaN)
+    if length(boot_beta) >= 100 && isfinite(beta_hat0)
+        z0 = quantile(Normal(), mean(boot_beta .< beta_hat0))
+        a = 0.0
+        if length(jack) >= 5
+            jack_mean = mean(jack)
+            num = sum((jack_mean .- jack).^3)
+            den = 6.0 * (sum((jack_mean .- jack).^2))^(3 / 2)
+            a = den != 0.0 ? num / den : 0.0
+        end
+        zα1 = quantile(Normal(), 0.025)
+        zα2 = quantile(Normal(), 0.975)
+        α1 = cdf(Normal(), z0 + (z0 + zα1) / (1 - a * (z0 + zα1)))
+        α2 = cdf(Normal(), z0 + (z0 + zα2) / (1 - a * (z0 + zα2)))
+        α1 = clamp(α1, 0.0, 1.0)
+        α2 = clamp(α2, 0.0, 1.0)
+        beta_ci = (quantile(boot_beta, α1), quantile(boot_beta, α2))
+    elseif length(boot_beta) >= 100
+        beta_ci = (quantile(boot_beta, 0.025), quantile(boot_beta, 0.975))
+    end
+    if length(boot_theil) >= 100
+        theil_ci = (quantile(boot_theil, 0.025), quantile(boot_theil, 0.975))
+    end
+
+    return (
+        beta_hat = isempty(boot_beta) ? NaN : median(boot_beta),
+        beta_se = isempty(boot_beta) ? NaN : std(boot_beta),
+        beta_ci = beta_ci,
+        theil_sen = isempty(boot_theil) ? NaN : median(boot_theil),
+        theil_ci = theil_ci,
+        n_boot = length(boot_beta),
+    )
 end
 
 function kappa_star_from_bimodality(
@@ -600,31 +882,61 @@ end
 # TeX table
 # -----------------------------
 function write_tex_table(df::DataFrame, path::String)
+    impl_map = Dict(
+        "first_crossing" => "First-crossing (A)",
+        "interp" => "Interp.\\ to boundary (B)",
+    )
+    df = filter(row -> haskey(impl_map, row.impl), df)
+    dt_order = sort(unique(df.dt), rev=true)
+
     open(path, "w") do io
         println(io, "% Auto-generated by run_validation.jl")
-        println(io, "\\begin{tabular}{lcccccc}")
+        println(io, "\\begin{table}[!t]")
+        println(io, "\\centering")
+        println(io, "\\footnotesize")
+        println(io, "\\caption{Numerical robustness checks for the simulation-based diagnostics.")
+        println(io, "\$\\kappa^\\star_{\\mathrm{eff}}\$ denotes the estimated instability onset in the finite-\$N\$ ABM under the operational criterion described in the replication scripts; \$\\hat\\beta\$ is the fitted scaling exponent from the order-parameter curve near onset (used only as supportive evidence for a supercritical normal form).")
+        println(io, "Standard errors (s.e.) are computed by bootstrap, accounting for uncertainty in \\(\\kappa^*\\), window selection, and sampling variability.}")
+        println(io, "\\label{tab:robustness}")
+        println(io, "\\begin{tabular}{lcccc}")
         println(io, "\\toprule")
-        latex_inline(s) = "\\(" * s * "\\)"
-        header = "Impl & " *
-                 latex_inline("\\Delta t") * " & " *
-                 latex_inline("N") * " & " *
-                 latex_inline("\\kappa^*_{\\mathrm{eff}}") * " & s.e. & " *
-                 latex_inline("\\beta") * " & s.e. \\\\"
-        println(io, header)
+        println(io, "Implementation & \$\\Delta t\$ & \$N\$ & \$\\kappa^\\star_{\\mathrm{eff}}\$ & \$\\hat\\beta\$ (s.e.) \\\\")
         println(io, "\\midrule")
-        for impl in unique(df.impl)
+
+        for impl in sort(unique(df.impl))
+            impl_display = impl_map[impl]
             df_impl = df[df.impl .== impl, :]
-            for dt in unique(df_impl.dt)
+            for dt in dt_order
                 df_dt = df_impl[df_impl.dt .== dt, :]
                 for row in eachrow(df_dt)
-                    @printf(io, "%s & %.4g & %d & %.5f & %.5f & %.4f & %.4f \\\\\n",
-                            row.impl, row.dt, row.N, row.kappa_star_eff, row.kappa_se, row.beta_hat, row.beta_se)
+                    dt_latex = if dt == 0.01
+                        "\$10^{-2}\$"
+                    elseif dt == 0.005
+                        "\$5\\times 10^{-3}\$"
+                    elseif dt == 0.001
+                        "\$10^{-3}\$"
+                    else
+                        "\$" * string(dt) * "\$"
+                    end
+                    beta_str = if isfinite(row.beta_hat)
+                        @sprintf("%.4f (%.4f)", row.beta_hat, row.beta_se)
+                    else
+                        "---"
+                    end
+                    @printf(io, "%s & %s & %d & %.5f & %s \\\\\n",
+                            impl_display, dt_latex, row.N, row.kappa_star_eff, beta_str)
+                end
+                if dt != last(dt_order)
+                    println(io, "\\addlinespace")
                 end
             end
-            println(io, "\\midrule")
+            if impl != last(sort(unique(df.impl)))
+                println(io, "\\midrule")
+            end
         end
         println(io, "\\bottomrule")
         println(io, "\\end{tabular}")
+        println(io, "\\end{table}")
     end
 end
 
@@ -673,17 +985,18 @@ function main()
     outdir = cfg["output_dir"]
     isdir(outdir) || mkpath(outdir)
     isdir(joinpath(outdir, "figs")) || mkpath(joinpath(outdir, "figs"))
+    isdir(joinpath(outdir, "cache")) || mkpath(joinpath(outdir, "cache"))
 
     log_path = joinpath(outdir, "run.log")
     open(log_path, "w") do log_io
         println("============================================================")
-        println("NUMERICAL VALIDATION PIPELINE")
+        println("NUMERICAL VALIDATION PIPELINE (RIGOROUS MODE)")
         println("============================================================")
         println("Config: $config_path")
         println("Mode: ", quick ? "quick" : "full")
         println("Timestamp: ", string(now()))
         println(log_io, "============================================================")
-        println(log_io, "NUMERICAL VALIDATION PIPELINE")
+        println(log_io, "NUMERICAL VALIDATION PIPELINE (RIGOROUS MODE)")
         println(log_io, "============================================================")
         println(log_io, "Config: $config_path")
         println(log_io, "Mode: ", quick ? "quick" : "full")
@@ -695,13 +1008,15 @@ function main()
 
         seeds = Int(get(grid, "seeds", 20))
         seed_base = Int(get(grid, "seed_base", 0))
-        T = Float64(runtime["T"])
+        T_base = Float64(runtime["T"])
         burn_in = Float64(runtime["burn_in"])
         mt_stride = Int(runtime["mt_stride"])
+        T_max = Float64(get(runtime, "T_max", 1200.0))
+        tau0 = Float64(get(runtime, "tau0", 50.0))
 
         if quick
             seeds = Int(get(cfg["quick"], "seeds", seeds))
-            T = Float64(get(cfg["quick"], "T", T))
+            T_base = Float64(get(cfg["quick"], "T", T_base))
             burn_in = Float64(get(cfg["quick"], "burn_in", burn_in))
         end
 
@@ -727,6 +1042,7 @@ function main()
         late_window_frac = Float64(beta_cfg["late_window_frac"])
         n_boot_beta = Int(beta_cfg["n_boot"])
         min_points = Int(beta_cfg["min_points"])
+        convergence_frac = Float64(get(beta_cfg, "convergence_frac", 0.2))
 
         if quick
             kappa_points = Int(get(cfg["quick"], "kappa_points", kappa_points))
@@ -752,6 +1068,14 @@ function main()
             kappa_se=Float64[],
             beta_hat=Float64[],
             beta_se=Float64[],
+            beta_ci_lower=Float64[],
+            beta_ci_upper=Float64[],
+            theil_sen_beta=Float64[],
+            n_scaling_points=Int[],
+            delta_window_lo=Float64[],
+            delta_window_hi=Float64[],
+            fraction_converged=Float64[],
+            m0=Float64[],
             seeds=Int[],
             horizon=Float64[],
             burnin=Float64[],
@@ -766,6 +1090,26 @@ function main()
                     println(log_io, "------------------------------------------------------------")
                     @printf(log_io, "impl=%s  dt=%.4g  N=%d  seeds=%d\n", String(impl), dt, N, seeds)
 
+                    # Step 1: baseline m0 from deep subcritical
+                    m0, m0_se, _ = estimate_m0(
+                        p;
+                        kappa_frac=0.5,
+                        N=N,
+                        T=T_base,
+                        dt=dt,
+                        n_ensemble=seeds,
+                        seed_base=seed_base + 1000000,
+                        impl=impl,
+                        mt_stride=mt_stride,
+                        epsilon=epsilon,
+                        late_window_frac=late_window_frac,
+                        convergence_frac=convergence_frac,
+                        n_boot=200,
+                    )
+                    @printf("  m0 = %.6f (se=%.6f)\n", m0, m0_se)
+                    @printf(log_io, "  m0 = %.6f (se=%.6f)\n", m0, m0_se)
+
+                    # Step 2: growth scan for kappa* (with bootstrap)
                     kappa_min = kappa_theory * kappa_min_factor
                     kappa_max = kappa_theory * kappa_max_factor
                     kappa_grid = collect(range(kappa_min, kappa_max; length=grid_points))
@@ -774,7 +1118,7 @@ function main()
                         p;
                         kappa_grid=kappa_grid,
                         N=N,
-                        T=T,
+                        T=T_base,
                         dt=dt,
                         n_ensemble=seeds,
                         seed_base=seed_base,
@@ -792,52 +1136,173 @@ function main()
                     @printf(log_io, "  kappa*_growth = %.6f (se=%.6f, status=%s)\n",
                             growth.kappa_star, growth.kappa_se, growth.status)
 
-                    bimod = kappa_star_from_bimodality(
-                        p,
-                        kappa_grid;
-                        N=N,
-                        T=T,
-                        dt=dt,
-                        n_ensemble=seeds,
-                        seed_base=seed_base,
-                        impl=impl,
-                        mt_stride=mt_stride,
-                        epsilon=epsilon,
-                        threshold=bimod_threshold,
-                    )
-
-                    @printf("  kappa*_bimodality = %.6f (threshold=%.2f)\n",
-                            bimod.kappa_star, bimod_threshold)
-                    @printf(log_io, "  kappa*_bimodality = %.6f (threshold=%.2f)\n",
-                            bimod.kappa_star, bimod_threshold)
-
                     kappa_eff = growth.kappa_star
-                    if !isfinite(kappa_eff)
+                    if !isfinite(kappa_eff) || kappa_eff <= 0
+                        bimod = kappa_star_from_bimodality(
+                            p,
+                            kappa_grid;
+                            N=N,
+                            T=T_base,
+                            dt=dt,
+                            n_ensemble=seeds,
+                            seed_base=seed_base,
+                            impl=impl,
+                            mt_stride=mt_stride,
+                            epsilon=epsilon,
+                            threshold=bimod_threshold,
+                        )
+                        @printf("  kappa*_bimodality = %.6f (threshold=%.2f)\n",
+                                bimod.kappa_star, bimod_threshold)
+                        @printf(log_io, "  kappa*_bimodality = %.6f (threshold=%.2f)\n",
+                                bimod.kappa_star, bimod_threshold)
                         kappa_eff = bimod.kappa_star
                     end
 
-                    delta_grid = exp.(range(log(delta_window[1]), log(delta_window[2]); length=kappa_points))
-                    beta = beta_from_sweep(
-                        p;
-                        kappa_star=kappa_eff,
-                        deltas=delta_grid,
-                        N=N,
-                        T=T,
-                        dt=dt,
-                        n_ensemble=seeds,
-                        seed_base=seed_base,
-                        impl=impl,
-                        mt_stride=mt_stride,
-                        epsilon=epsilon,
-                        late_window_frac=late_window_frac,
-                        n_boot=n_boot_beta,
-                        min_points=min_points,
-                    )
+                    if !isfinite(kappa_eff) || kappa_eff <= 0
+                        @warn "No valid kappa* for impl=$(impl), dt=$(dt), N=$(N); skipping beta fit."
+                        push!(results, (
+                            impl=String(impl),
+                            dt=dt,
+                            N=N,
+                            kappa_star_eff=NaN,
+                            kappa_se=NaN,
+                            beta_hat=NaN,
+                            beta_se=NaN,
+                            beta_ci_lower=NaN,
+                            beta_ci_upper=NaN,
+                            theil_sen_beta=NaN,
+                            n_scaling_points=0,
+                            delta_window_lo=NaN,
+                            delta_window_hi=NaN,
+                            fraction_converged=NaN,
+                            m0=m0,
+                            seeds=seeds,
+                            horizon=T_base,
+                            burnin=burn_in,
+                            criterion="growth_scan + bimodality",
+                        ))
+                        continue
+                    end
 
-                    @printf("  beta_hat = %.4f (se=%.4f, n=%d, R2=%.3f)\n",
-                            beta.beta_hat, beta.beta_se, beta.n, beta.r2)
-                    @printf(log_io, "  beta_hat = %.4f (se=%.4f, n=%d, R2=%.3f)\n",
-                            beta.beta_hat, beta.beta_se, beta.n, beta.r2)
+                    # Step 3: supercritical sweep with adaptive T and convergence filter
+                    delta_sweep = exp.(range(log(delta_window[1]), log(delta_window[2]); length=kappa_points))
+                    kappas_sweep = kappa_eff .* (1 .+ delta_sweep)
+                    per_kappa_samples = Vector{Vector{Float64}}(undef, length(kappas_sweep))
+
+                    for (i, kappa_val) in enumerate(kappas_sweep)
+                        T_adapt = adaptive_T(kappa_val, kappa_eff, T_base, T_max, tau0)
+                        res = run_ensemble(
+                            p;
+                            kappa=kappa_val,
+                            N=N,
+                            T=T_adapt,
+                            dt=dt,
+                            n_ensemble=seeds,
+                            seed_base=seed_base + 30000 * i,
+                            impl=impl,
+                            mt_stride=mt_stride,
+                            init_mode=:random,
+                            epsilon=epsilon,
+                        )
+                        n_time = size(res.mean_traj, 2)
+                        late_start = max(1, Int(floor((1 - late_window_frac) * n_time)))
+                        mbar = Float64[]
+                        for j in 1:seeds
+                            abs_traj = abs.(res.mean_traj[j, :])
+                            if is_ensemble_converged(abs_traj, res.time_grid, convergence_frac)
+                                push!(mbar, mean(abs_traj[late_start:end]))
+                            end
+                        end
+                        if isempty(mbar)
+                            mbar = [mean(abs.(res.mean_traj[j, late_start:end])) for j in 1:seeds]
+                            @warn "No converged runs at kappa=$(round(kappa_val, digits=5)); using all runs."
+                        end
+                        per_kappa_samples[i] = mbar
+                    end
+
+                    valid_idx = findall(i -> !isempty(per_kappa_samples[i]), eachindex(per_kappa_samples))
+                    per_kappa_samples = per_kappa_samples[valid_idx]
+                    kappas_sweep = kappas_sweep[valid_idx]
+
+                    cache_rows = Vector{NamedTuple}()
+                    for i in eachindex(kappas_sweep)
+                        runs = per_kappa_samples[i]
+                        isempty(runs) && continue
+                        push!(cache_rows, (
+                            kappa = kappas_sweep[i],
+                            m_abs_mean = mean(runs),
+                            m_abs_se = std(runs) / sqrt(max(length(runs), 1)),
+                            n_runs = length(runs),
+                        ))
+                    end
+                    if !isempty(cache_rows)
+                        dt_tag = replace(string(dt), "." => "p")
+                        cache_name = "sweep_impl=$(String(impl))_dt=$(dt_tag)_N=$(N).csv"
+                        CSV.write(joinpath(outdir, "cache", cache_name), DataFrame(cache_rows))
+                    end
+
+                    # Baseline window selection (for reporting)
+                    M_corr_full = Float64[]
+                    for i in eachindex(kappas_sweep)
+                        mbar = mean(per_kappa_samples[i])
+                        push!(M_corr_full, sqrt(max(mbar^2 - m0^2, 0.0)))
+                    end
+                    opt_win, n_win, _ = select_delta_window(
+                        kappas_sweep, M_corr_full, kappa_eff;
+                        delta_min=delta_window[1], delta_max=delta_window[2],
+                        n_steps=20, min_points=min_points,
+                    )
+                    delta_vals = (kappas_sweep .- kappa_eff) ./ kappa_eff
+                    win_mask = (delta_vals .>= opt_win[1]) .& (delta_vals .<= opt_win[2]) .& (M_corr_full .> 0)
+                    n_scaling = sum(win_mask)
+
+                    # Step 4: nested bootstrap for beta
+                    beta_hat = NaN
+                    beta_se = NaN
+                    beta_ci = (NaN, NaN)
+                    theil_beta = NaN
+
+                    if !isempty(growth.boot_kappa) && length(kappas_sweep) >= min_points
+                        boot_result = bootstrap_beta_nested(
+                            kappas_sweep,
+                            per_kappa_samples,
+                            m0,
+                            growth.boot_kappa,
+                            delta_window;
+                            n_outer=n_boot_beta,
+                            delta_steps=20,
+                            min_points=min_points,
+                        )
+                        beta_hat = boot_result.beta_hat
+                        beta_se = boot_result.beta_se
+                        beta_ci = boot_result.beta_ci
+                        theil_beta = boot_result.theil_sen
+                    else
+                        if n_scaling >= min_points
+                            x = log.(delta_vals[win_mask])
+                            y = log.(M_corr_full[win_mask])
+                            X = hcat(ones(length(x)), x)
+                            coeffs = X \ y
+                            beta_hat = coeffs[2]
+                            resid = y - X * coeffs
+                            sigma2 = sum(resid.^2) / max(length(x) - 2, 1)
+                            se_beta = sqrt(sigma2 / sum((x .- mean(x)).^2))
+                            beta_se = se_beta
+                            beta_ci = (beta_hat - 1.96 * se_beta, beta_hat + 1.96 * se_beta)
+                            theil_beta = theil_sen_slope(x, y)
+                        end
+                    end
+
+                    @printf("  beta_hat = %.4f (se=%.4f) [95%% CI: %.4f, %.4f]\n",
+                            beta_hat, beta_se, beta_ci[1], beta_ci[2])
+                    @printf("  Theil-Sen beta = %.4f\n", theil_beta)
+                    @printf(log_io, "  beta_hat = %.4f (se=%.4f) [95%% CI: %.4f, %.4f]\n",
+                            beta_hat, beta_se, beta_ci[1], beta_ci[2])
+                    @printf(log_io, "  Theil-Sen beta = %.4f\n", theil_beta)
+
+                    all_runs = isempty(per_kappa_samples) ? Float64[] : vcat(per_kappa_samples...)
+                    denom = seeds * max(length(kappas_sweep), 1)
+                    frac_conv = denom > 0 ? length(all_runs) / denom : NaN
 
                     push!(results, (
                         impl=String(impl),
@@ -845,13 +1310,33 @@ function main()
                         N=N,
                         kappa_star_eff=kappa_eff,
                         kappa_se=growth.kappa_se,
-                        beta_hat=beta.beta_hat,
-                        beta_se=beta.beta_se,
+                        beta_hat=beta_hat,
+                        beta_se=beta_se,
+                        beta_ci_lower=beta_ci[1],
+                        beta_ci_upper=beta_ci[2],
+                        theil_sen_beta=theil_beta,
+                        n_scaling_points=n_scaling,
+                        delta_window_lo=opt_win[1],
+                        delta_window_hi=opt_win[2],
+                        fraction_converged=frac_conv,
+                        m0=m0,
                         seeds=seeds,
-                        horizon=T,
+                        horizon=T_base,
                         burnin=burn_in,
                         criterion="growth_scan + bimodality",
                     ))
+
+                    open(joinpath(outdir, "diagnostics.log"), "a") do diag_io
+                        println(diag_io, "Configuration: impl=$(impl), dt=$(dt), N=$(N)")
+                        println(diag_io, "  m0 = $(m0) (se=$(m0_se))")
+                        println(diag_io, "  kappa* = $(kappa_eff) (se=$(growth.kappa_se))")
+                        println(diag_io, "  beta = $(beta_hat) (se=$(beta_se))  CI: [$(beta_ci[1]), $(beta_ci[2])]")
+                        println(diag_io, "  Theil-Sen beta = $(theil_beta)")
+                        println(diag_io, "  n_scaling_points = $(n_scaling)")
+                        println(diag_io, "  delta window = [$(opt_win[1]), $(opt_win[2])]")
+                        println(diag_io, "  fraction converged = $(frac_conv)")
+                        println(diag_io)
+                    end
                 end
             end
         end

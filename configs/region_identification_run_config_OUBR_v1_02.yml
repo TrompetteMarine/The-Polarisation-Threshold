@@ -1,0 +1,169 @@
+################################################################################
+# RUN CONFIG (YML) — OU–BR Region Identification Experiments (v1_02)
+#
+# Use with: region_identification_prompt_OUBR_v1_02.yml
+#
+# This file defines WHAT to run (parameter points / grids) and HOW to run it
+# (runtime knobs, robustness panel, optional expensive diagnostics).
+################################################################################
+
+meta:
+  run_config_version: "1.0"
+  prompt_file: "region_identification_prompt_OUBR_v1_02.yml"
+  output_root: "outputs/region_id/"
+  experiment_name: "region_id_OUBR_v1_02_default"
+
+# ------------------------------------------------------------------------------
+# 1) MODEL PARAMETERS
+# ------------------------------------------------------------------------------
+# You may specify points using (c0, eta) OR (c0, sigma). If sigma is given,
+# eta is derived as: eta = sigma^2 / (2*lambda*Theta^2).
+model_defaults:
+  lambda: 0.85
+  Theta:  2.0
+  # If both eta and sigma are present at a point, sigma wins and eta is recomputed.
+  parameterisation: "eta"   # "eta" or "sigma"
+
+# A convenient reference: your “current parameters” from screenshots
+reference_points:
+  - label: "current_params"
+    c0: 0.80
+    sigma: 0.8
+    # derived:
+    eta: 0.0941176471
+
+# ------------------------------------------------------------------------------
+# 2) PARAMETER POINTS / GRIDS TO CLASSIFY
+# ------------------------------------------------------------------------------
+# Options:
+#  - mode: "explicit_points"  -> list out points manually
+#  - mode: "cartesian_grid"   -> cartesian product of c0_list × eta_list
+#  - mode: "hybrid"           -> both explicit points + grid
+parameter_sweep:
+  mode: "hybrid"
+
+  explicit_points:
+    # A small “coverage” set (good for a first paper-ready table)
+    - label: "low_noise_mid_reset"
+      c0: 0.40
+      eta: 0.10
+    - label: "mid_noise_mid_reset"
+      c0: 0.40
+      eta: 0.25
+    - label: "high_noise_mid_reset"
+      c0: 0.40
+      eta: 0.60
+
+    - label: "low_noise_high_reset"
+      c0: 0.80
+      eta: 0.10
+    - label: "mid_noise_high_reset"
+      c0: 0.80
+      eta: 0.25
+    - label: "high_noise_high_reset"
+      c0: 0.80
+      eta: 0.60
+
+  cartesian_grid:
+    enabled: true
+    c0_list:  [0.00, 0.10, 0.20, 0.40, 0.60, 0.80]
+    # Include lower eta values because your reference point is ~0.094
+    eta_list: [0.05, 0.10, 0.20, 0.40, 0.80]
+    # If you want a denser phase map later, replace with linspace definitions.
+
+# ------------------------------------------------------------------------------
+# 3) RUN MODES (runtime knobs)
+# ------------------------------------------------------------------------------
+# Choose one mode below. The pipeline should accept overriding any field.
+run_mode: "standard"   # "quick_smoke" | "standard" | "tc_focus"
+
+modes:
+  quick_smoke:
+    description: "Fast sanity check; not valid for final region labels."
+    robustness_panel:
+      dt_values: [1.0e-2]
+      boundary_impl: ["A_first_cross"]
+      N_values: [2000]
+      seeds: 3
+    kappa_scan:
+      use_coarse: true
+      use_refined: false
+      use_tc_refined: false
+    diagnostics:
+      compute_hysteresis: false
+      compute_psd: false
+      compute_beta: true
+      compute_alpha: false
+
+  standard:
+    description: "Paper-grade conservative classification for I/III/IV candidates; TC likely inconclusive unless lucky."
+    robustness_panel:
+      dt_values: [1.0e-2, 5.0e-3]
+      boundary_impl: ["A_first_cross", "B_interpolate"]
+      N_values: [5000, 10000]
+      seeds: 10
+    kappa_scan:
+      use_coarse: true
+      use_refined: true
+      use_tc_refined: false
+    diagnostics:
+      compute_hysteresis: true
+      compute_psd: true
+      compute_beta: true
+      compute_alpha: false   # enable only when you want TC claims
+
+  tc_focus:
+    description: "TC/weak-subcritical hunting; expensive. Enables tc_refined grid + alpha scaling."
+    robustness_panel:
+      dt_values: [1.0e-2, 5.0e-3]
+      boundary_impl: ["A_first_cross", "B_interpolate"]
+      N_values: [5000, 10000]
+      seeds: 20
+    kappa_scan:
+      use_coarse: true
+      use_refined: true
+      use_tc_refined: true
+    diagnostics:
+      compute_hysteresis: true
+      compute_psd: true
+      compute_beta: true
+      compute_alpha: true
+      alpha_fit_N_values: [1000, 3000, 10000, 30000, 100000]
+      alpha_kappa_offset_rel: 0.003  # evaluate at κ = κ*_eff*(1+offset)
+
+# ------------------------------------------------------------------------------
+# 4) COMPUTATION + IO OPTIONS
+# ------------------------------------------------------------------------------
+execution:
+  threads: "auto"             # "auto" or integer
+  rng_seed_base: 20260219     # reproducibility base seed
+  cache_intermediate: true
+  write_raw_timeseries: false # set true only when debugging PSD/oscillations
+  max_walltime_minutes: 0     # 0 means no explicit cap; otherwise the runner may stop
+
+io:
+  output_subdir: "runs/default/"
+  write_csv: true
+  write_tex: true
+  write_configs: true
+  write_provenance: true
+
+# ------------------------------------------------------------------------------
+# 5) OPTIONAL: κ⋆ ANALYTIC COMPUTATION (Appendix G)
+# ------------------------------------------------------------------------------
+# If the repo already computes κ⋆ analytically, set enabled=true and point to that module.
+# Otherwise leave disabled and use κ⋆_eff from simulation criteria.
+kappa_star_analytic:
+  enabled: false
+  method: "appendix_G_poisson_bvp"
+  outputs:
+    surface_csv: "outputs/phase_diagram/kappa_star_surface.csv"
+
+# ------------------------------------------------------------------------------
+# 6) OVERRIDES / ADVANCED
+# ------------------------------------------------------------------------------
+overrides:
+  # If you want to force a different κ-grid or time windows, you can override here.
+  # Keep empty unless you know the repo’s conventions you want to match.
+  kappa_scan_overrides: {}
+  time_window_overrides: {}

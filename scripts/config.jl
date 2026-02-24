@@ -11,6 +11,8 @@ const SCALING_DELTA_WINDOWS = [
     (1e-2, 1e-1),
     (5e-3, 2e-1),
 ]
+const SCALING_N_MIN = 15               # minimum points for a stable log-log scaling fit
+const SCALING_WINDOW_MAX = 0.12        # max delta in valid pitchfork power-law window
 
 """
     PipelineConfig
@@ -157,7 +159,7 @@ function parse_config(args::Vector{String})::PipelineConfig
 
     # Ensemble settings
     n_ensemble_scenarios = run_mode == :pub ? 200 : 20
-    n_ensemble_kappa_sweep = run_mode == :pub ? 80 : 10
+    n_ensemble_kappa_sweep = run_mode == :pub ? 80 : 30
     n_rep_per_kappa_nearcrit = run_mode == :pub ? 3 : 1
     mt_stride = max(1, Int(round(0.05 / dt)))
     snapshot_times = [0.0, 10.0, 20.0, 40.0, 80.0, 160.0, 320.0, T]
@@ -186,20 +188,20 @@ function parse_config(args::Vector{String})::PipelineConfig
 
     # Growth scan
     growth_scan_enabled = true
-    growth_scan_factors = collect(range(0.6, 1.4; length=9))
+    growth_scan_factors = collect(range(0.70, 1.30; length=15))
     growth_scan_window = (10.0, 60.0)
-    growth_scan_bootstrap = run_mode == :pub ? 200 : 50
+    growth_scan_bootstrap = run_mode == :pub ? 200 : 100
     growth_scan_min_points = 8
 
     # Scaling regression
     fit_windows = [(10.0, 50.0), (20.0, 80.0), (50.0, 150.0)]
     scaling_delta_windows = [(1e-2, 5e-2), (1e-2, 1e-1), (5e-3, 2e-1)]
     scaling_amp_floor = 1e-6
-    scaling_n_min = 42
-    scaling_n_target = 72
-    scaling_delta_window_default = (1.0e-2, 1.0e-1)
+    scaling_n_min = SCALING_N_MIN
+    scaling_n_target = 30
+    scaling_delta_window_default = (1.0e-2, SCALING_WINDOW_MAX)
     scaling_allow_window_expand = true
-    scaling_max_window_expand = (5.0e-3, 2.0e-1)
+    scaling_max_window_expand = (5.0e-3, 1.5e-1)
     scaling_saturation_filter = true
     scaling_saturation_cutoff_quantile = 0.85
     scaling_convergence_gate = true
