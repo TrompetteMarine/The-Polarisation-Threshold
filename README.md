@@ -452,6 +452,86 @@ using .PhylogeneticDiagram
 - Falls back to Plots.jl if CairoMakie is unavailable
 - All core functionality works with the base BeliefSim installation
 
+### 10. OU-BR region identification pipeline (new run modes)
+
+The OU-BR region classifier entry point is:
+
+```bash
+julia --project=. scripts/region_id/run_region_identification.jl --config configs/region_identification_run_config_OUBR_v1_02.yml
+```
+
+The script also supports the legacy config format:
+
+```bash
+julia --project=. scripts/region_id/run_region_identification.jl --config configs/region_id.yaml
+```
+
+#### Mode families
+
+1. **Parameter sweep mode** (`parameter_sweep.mode`)
+   - `explicit_points`: run only the listed points.
+   - `cartesian_grid`: run only `c0_list × eta_list` (or `sigma_list` if parameterized by sigma).
+   - `hybrid`: union of explicit points and cartesian grid.
+
+2. **Scientific run mode** (`run_mode`)
+   - `quick_smoke`: fastest sanity check; reduced panel, no expensive diagnostics.
+   - `standard`: paper-grade default for robust Region 0/I/III/IV classification.
+   - `tc_focus`: expensive tricritical search mode; enables tc-refined scan and alpha fitting.
+
+3. **Execution mode** (`execution.parallel_mode`)
+   - `serial`: single outer worker.
+   - `threads`: coarse-grained threaded scheduling using `Base.Threads`.
+
+4. **Parallelization level** (`execution.parallel_level`)
+   - `points`: parallelize across parameter points.
+   - `panels`: parallelize across `(point, dt, impl)` jobs.
+   - `n`: parallelize across `N` values within one panel job.
+
+5. **Device mode** (`execution.device`)
+   - `cpu`: force CPU simulator.
+   - `gpu`: request GPU simulator hook; if unavailable or failing at runtime, fallback to CPU.
+   - `auto`: try GPU hook if present, otherwise CPU.
+   - `hybrid`: run coarse jobs with a dedicated GPU worker plus CPU workers (`threads - 1`), with graceful CPU fallback if GPU is unavailable.
+
+#### New execution knobs
+
+- `execution.max_threads_outer`: cap for outer threaded workers.
+- `execution.threaded_logging`: enable thread-safe shared logging (default recommended: `false`).
+- `execution.benchmark_mode`: run optional `run_panel` micro-benchmark and write `benchmark_summary.txt`.
+- `execution.benchmark_repeats`: number of benchmark repetitions.
+
+Backward compatibility is preserved for older configs using:
+- `execution.threads: "auto"` or integer; this is mapped internally to the new parallel controls.
+
+#### Recommended defaults
+
+```yaml
+execution:
+  parallel_mode: "threads"   # "serial" | "threads"
+  parallel_level: "panels"   # "points" | "panels" | "n"
+  max_threads_outer: 8
+  threaded_logging: false
+  device: "auto"             # "cpu" | "gpu" | "auto" | "hybrid"
+  benchmark_mode: false
+  benchmark_repeats: 1
+```
+
+#### Hybrid CPU+GPU guidance
+
+- Use `parallel_level: "panels"` with `parallel_mode: "threads"` and `device: "hybrid"` for the highest throughput.
+- In hybrid mode, the scheduler reserves one outer worker for GPU jobs and uses up to `min(max_threads_outer, Threads.nthreads()-1)` CPU workers.
+- For full CPU saturation with one GPU worker, launch Julia with all physical threads and let hybrid mode keep one worker for GPU dispatch.
+- If `run_ensemble_oubr_gpu` is missing or CUDA is not functional, hybrid mode automatically falls back to CPU-only execution without changing outputs.
+
+#### Output notes
+
+- Main outputs are written under `outputs/region_id/...` as:
+  - `region_identification_table.csv` / `.tex`
+  - `region_signature_table.csv` / `.tex`
+  - `run.log`
+  - `README_provenance.txt`
+- Table schema is unchanged across serial vs threaded runs.
+
 ---
 
 ## Model simulated in numerics

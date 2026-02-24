@@ -1,21 +1,21 @@
 \begin{table}[h]
 \centering
-\caption{Empirical validation of supercritical pitchfork bifurcation. The order parameter
-$|a^*| = \sqrt{V - V_{\mathrm{baseline}}}$ measures polarization amplitude via excess variance.}
+\caption{Empirical validation of supercritical pitchfork bifurcation. The primary order parameter is
+M* = E|m| (with aligned means shown for decided runs), which is symmetry-aware under Z2 invariance.}
 \label{tab:bifurcation_validation}
 \begin{tabular}{lcccl}
 \toprule
-Test & Statistic & 95\% CI & $p$-value & Verdict \\
+Test & Statistic & 95\% CI & p-value & Verdict \\
 \midrule
-Scaling (H\_0: $\beta = 0.5$) &
-  $\hat{\beta} = 3.832$ &
-  $[3.022, 4.642]$ &
+Scaling (H0: beta = 0.5) &
+  beta_hat = 0.186 &
+  [0.173, 0.198] &
   0.0 &
   Fail \\
 Hysteresis &
-  $\bar{|\Delta a^*|} = 0.0053$ &
+  mean |Delta M*| = 0.0013 &
   --- &
-  0.019 &
+  0.042 &
   Fail \\
 \bottomrule
 \end{tabular}

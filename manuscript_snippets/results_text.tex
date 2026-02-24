@@ -1,10 +1,11 @@
-We validate the supercritical pitchfork prediction using the variance-based order
-parameter $|a^*| = \sqrt{V - V_{\mathrm{baseline}}}$, where $V$ is the population variance and
-$V_{\mathrm{baseline}}$ is the minimum variance across the sweep (near $\kappa^*$). This captures polarization amplitude
-when the population splits symmetrically into opposing camps. Because of symmetry, the signed mean can
-remain near zero above $\kappa^*$; we therefore report $E|m(t)|$ and RMS(m) as primary order parameters.
-The scaling exponent
-$\hat{\beta} = 3.832$ (95\% CI: $[3.022,
-4.642]$, $p = 0.0$)
-is consistent with the theoretical prediction $\beta = 0.5$. The absence of hysteresis
-($p = 0.019$) supports supercriticality.
+We validate the supercritical pitchfork prediction using the symmetry-aware order parameter
+M* = E|m(t)|, with aligned means computed from run-wise branch signs. Because of Z2 symmetry, the
+signed mixture mean can remain near zero above kappa*; therefore E|m(t)| and RMS(m) are the
+primary indicators of symmetry breaking. The scaling exponent
+beta_hat = 0.186 (95% CI: [0.173,
+0.198], p = 0.0),
+estimated for M_corr = sqrt(max(M_abs^2 − M0^2, 0)) in a near-critical window
+Δ = (κ−κ*)/κ* ∈ [0.01,
+0.05] with n = 9 points,
+is compared with the theoretical prediction beta = 0.5. The absence of hysteresis
+(p = 0.042) supports supercriticality.

@@ -7,8 +7,31 @@ using Distributed
 using BeliefSim
 using BeliefSim.Types
 using BeliefSim.Model: euler_maruyama_step!, reset_step!
+using BeliefSim.Hazard: ν
 
-export EnsembleResults, simulate_snapshots_stats, run_ensemble_simulation
+const _CUDA_IMPORTED = let
+    ok = false
+    if Base.find_package("CUDA") !== nothing
+        try
+            @eval import CUDA
+            ok = true
+        catch
+            ok = false
+        end
+    end
+    ok
+end
+
+export EnsembleResults, simulate_snapshots_stats, run_ensemble_simulation, gpu_backend_ready
+
+function gpu_backend_ready()
+    _CUDA_IMPORTED || return false
+    try
+        return CUDA.functional()
+    catch
+        return false
+    end
+end
 
 struct EnsembleResults
     mean_trajectories::Matrix{Float64}      # n_ensemble x n_timepoints
@@ -128,6 +151,174 @@ function simulate_snapshots_stats(
     return snapshots, mt_times, mt_values, var_values, skew_values, kurt_values
 end
 
+@inline function _normalize_device(device)::Symbol
+    return Symbol(lowercase(String(device)))
+end
+
+function _store_snapshot_batch!(
+    snapshots::Vector{Vector{Vector{Float64}}},
+    u_host::Matrix{Float64},
+    snapshot_idx::Int,
+    row_lo::Int,
+    row_hi::Int,
+)
+    b = row_hi - row_lo + 1
+    @inbounds for j in 1:b
+        snapshots[row_lo + j - 1][snapshot_idx] = vec(u_host[:, j])
+    end
+    return nothing
+end
+
+function _write_gpu_moment_column!(
+    mean_traj::Matrix{Float64},
+    var_traj::Matrix{Float64},
+    skew_traj::Matrix{Float64},
+    kurt_traj::Matrix{Float64},
+    u,
+    col::Int,
+    row_lo::Int,
+    row_hi::Int,
+    track_moments::Bool,
+)
+    inv_n = 1.0 / size(u, 1)
+    m1 = vec(Array(CUDA.sum(u; dims=1))) .* inv_n
+    raw2 = vec(Array(CUDA.sum(u .* u; dims=1))) .* inv_n
+    varv = max.(raw2 .- m1 .^ 2, 0.0)
+    mean_traj[row_lo:row_hi, col] .= m1
+    var_traj[row_lo:row_hi, col] .= varv
+
+    if track_moments
+        raw3 = vec(Array(CUDA.sum(u .* u .* u; dims=1))) .* inv_n
+        raw4 = vec(Array(CUDA.sum(u .* u .* u .* u; dims=1))) .* inv_n
+        m3 = raw3 .- 3.0 .* m1 .* raw2 .+ 2.0 .* (m1 .^ 3)
+        m4 = raw4 .- 4.0 .* m1 .* raw3 .+ 6.0 .* (m1 .^ 2) .* raw2 .- 3.0 .* (m1 .^ 4)
+
+        skew = similar(m1)
+        kurt = similar(m1)
+        @inbounds for i in eachindex(m1)
+            if varv[i] <= 0.0 || !isfinite(varv[i])
+                skew[i] = 0.0
+                kurt[i] = 3.0
+            else
+                denom = varv[i]
+                skew[i] = m3[i] / (denom^(3 / 2))
+                kurt[i] = m4[i] / (denom^2)
+            end
+        end
+        skew_traj[row_lo:row_hi, col] .= skew
+        kurt_traj[row_lo:row_hi, col] .= kurt
+    else
+        skew_traj[row_lo:row_hi, col] .= NaN
+        kurt_traj[row_lo:row_hi, col] .= NaN
+    end
+
+    return nothing
+end
+
+if _CUDA_IMPORTED
+
+function _run_ensemble_simulation_gpu(
+    p::Params;
+    kappa::Float64,
+    n_ensemble::Int,
+    N::Int,
+    T::Float64,
+    dt::Float64,
+    base_seed::Int,
+    snapshot_times::Vector{Float64},
+    mt_stride::Int,
+    store_snapshots::Bool,
+    track_moments::Bool,
+    x_init::Union{Nothing, Vector{Float64}},
+    gpu_batch_size::Int,
+)
+    gpu_backend_ready() || error("CUDA backend not functional on this system.")
+
+    steps = Int(round(T / dt))
+    n_timepoints = Int(floor(steps / mt_stride)) + 1
+    time_grid_full = collect(0.0:dt:T)
+    time_grid_ref = collect(0:mt_stride:steps) .* dt
+
+    mean_traj = Matrix{Float64}(undef, n_ensemble, n_timepoints)
+    var_traj = Matrix{Float64}(undef, n_ensemble, n_timepoints)
+    skew_traj = Matrix{Float64}(undef, n_ensemble, n_timepoints)
+    kurt_traj = Matrix{Float64}(undef, n_ensemble, n_timepoints)
+
+    seeds = [base_seed + (i - 1) * 1000 for i in 1:n_ensemble]
+    snapshots = store_snapshots ? [Vector{Vector{Float64}}(undef, length(snapshot_times)) for _ in 1:n_ensemble] :
+                Vector{Vector{Vector{Float64}}}()
+
+    snapshot_indices = [clamp(Int(round(t / dt)) + 1, 1, length(time_grid_full)) for t in snapshot_times]
+    bsz = max(1, gpu_batch_size)
+
+    λ = p.λ
+    σ = p.σ
+    Θ = p.Θ
+    c0 = p.c0
+    sigma_sqrt_dt = σ * sqrt(dt)
+    init_scale = σ / sqrt(2 * λ)
+
+    for row_lo in 1:bsz:n_ensemble
+        row_hi = min(n_ensemble, row_lo + bsz - 1)
+        b = row_hi - row_lo + 1
+
+        CUDA.seed!(base_seed + (row_lo - 1) * 1000)
+        u = if x_init === nothing
+            CUDA.randn(Float64, N, b) .* init_scale
+        else
+            length(x_init) == N || error("x_init length $(length(x_init)) != N=$N")
+            x0 = reshape(x_init, N, 1)
+            CUDA.CuArray(repeat(x0, 1, b))
+        end
+
+        next_snap = 1
+        if store_snapshots && !isempty(snapshot_indices) && snapshot_indices[next_snap] == 1
+            _store_snapshot_batch!(snapshots, Array(u), next_snap, row_lo, row_hi)
+            next_snap += 1
+        end
+
+        col = 1
+        _write_gpu_moment_column!(mean_traj, var_traj, skew_traj, kurt_traj, u, col, row_lo, row_hi, track_moments)
+        col += 1
+
+        for step in 1:steps
+            gbar = CUDA.sum(u; dims=1) ./ N
+            ξ = CUDA.randn(Float64, size(u))
+            @. u = u + ((-λ * u + kappa * gbar) * dt + sigma_sqrt_dt * ξ)
+
+            rates = ν.(Ref(p.hazard), u, Θ)
+            probs = @. 1.0 - exp(-rates * dt)
+            draws = CUDA.rand(Float64, size(u))
+            @. u = ifelse(draws < probs, c0 * u, u)
+
+            idx = step + 1
+            if store_snapshots && next_snap <= length(snapshot_indices) && idx == snapshot_indices[next_snap]
+                _store_snapshot_batch!(snapshots, Array(u), next_snap, row_lo, row_hi)
+                next_snap += 1
+            end
+
+            if step % mt_stride == 0
+                _write_gpu_moment_column!(mean_traj, var_traj, skew_traj, kurt_traj, u, col, row_lo, row_hi, track_moments)
+                col += 1
+            end
+        end
+    end
+
+    return EnsembleResults(
+        mean_traj,
+        var_traj,
+        skew_traj,
+        kurt_traj,
+        snapshots,
+        time_grid_ref,
+        snapshot_times,
+        seeds,
+        N,
+    )
+end
+
+end # _CUDA_IMPORTED
+
 """
     run_ensemble_simulation(p::Params; kwargs...) -> EnsembleResults
 
@@ -147,7 +338,32 @@ function run_ensemble_simulation(
     track_moments::Bool = true,
     parallel::Bool = false,
     x_init::Union{Nothing, Vector{Float64}} = nothing,
+    device::Symbol = :cpu,
+    gpu_batch_size::Int = 16,
 )
+    dev = _normalize_device(device)
+    if dev in (:gpu, :auto)
+        if _CUDA_IMPORTED && gpu_backend_ready()
+            return _run_ensemble_simulation_gpu(
+                p;
+                kappa=kappa,
+                n_ensemble=n_ensemble,
+                N=N,
+                T=T,
+                dt=dt,
+                base_seed=base_seed,
+                snapshot_times=snapshot_times,
+                mt_stride=mt_stride,
+                store_snapshots=store_snapshots,
+                track_moments=track_moments,
+                x_init=x_init,
+                gpu_batch_size=gpu_batch_size,
+            )
+        elseif dev == :gpu
+            @warn "GPU requested but CUDA backend is unavailable; falling back to CPU."
+        end
+    end
+
     steps = Int(round(T / dt))
     n_timepoints = Int(floor(steps / mt_stride)) + 1
 

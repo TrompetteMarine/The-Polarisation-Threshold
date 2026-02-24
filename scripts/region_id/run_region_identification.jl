@@ -166,7 +166,7 @@ function parse_execution_options(cfg::AbstractDict)
     parallel_level = _parse_symbol_opt(get(execution, "parallel_level", "panels"), :panels, (:points, :panels, :n))
     max_threads_outer = max(1, Int(get(execution, "max_threads_outer", Threads.nthreads())))
     threaded_logging = Bool(get(execution, "threaded_logging", false))
-    device = _parse_symbol_opt(get(execution, "device", "cpu"), :cpu, (:cpu, :gpu, :auto))
+    device = _parse_symbol_opt(get(execution, "device", "cpu"), :cpu, (:cpu, :gpu, :auto, :hybrid))
     benchmark_mode = Bool(get(execution, "benchmark_mode", false))
     benchmark_repeats = max(1, Int(get(execution, "benchmark_repeats", 1)))
 
@@ -199,6 +199,15 @@ function effective_worker_count(opts::ExecutionOptions, n_jobs::Int)
     return min(n_jobs, Threads.nthreads(), max(1, opts.max_threads_outer))
 end
 
+function hybrid_cpu_worker_count(opts::ExecutionOptions, n_jobs::Int)
+    if opts.parallel_mode != :threads || n_jobs <= 1 || Threads.nthreads() <= 1
+        return 1
+    end
+    # Leave one thread available for the GPU worker when in hybrid mode.
+    cpu_cap = max(1, Threads.nthreads() - 1)
+    return min(n_jobs, cpu_cap, max(1, opts.max_threads_outer))
+end
+
 function threaded_collect(f::Function, jobs::Vector, n_workers::Int)
     out = Vector{Any}(undef, length(jobs))
     if isempty(jobs)
@@ -224,41 +233,92 @@ function threaded_collect(f::Function, jobs::Vector, n_workers::Int)
     return out
 end
 
-function resolve_run_ensemble_fn(device::Symbol, log_io::Union{IO,Nothing}; threaded::Bool = false)
-    cpu_fn = SimOUBR.run_ensemble_oubr
-    has_gpu_fn = isdefined(SimOUBR, :run_ensemble_oubr_gpu)
+function hybrid_collect(
+    jobs::Vector,
+    n_cpu_workers::Int,
+    use_gpu_worker::Bool,
+    f_cpu::Function,
+    f_gpu::Function,
+)
+    out = Vector{Any}(undef, length(jobs))
+    isempty(jobs) && return out
 
-    if device == :cpu
-        return cpu_fn
-    elseif device == :gpu
-        if !has_gpu_fn
-            log_line(log_io, "[execution] GPU requested but no GPU kernel is defined; falling back to CPU."; threaded=threaded)
-            return cpu_fn
-        end
-        gpu_fn = getfield(SimOUBR, :run_ensemble_oubr_gpu)
-        log_line(log_io, "[execution] Using GPU kernel when available; runtime errors fall back to CPU."; threaded=threaded)
-        return (p; kwargs...) -> begin
-            try
-                gpu_fn(p; kwargs...)
-            catch
-                cpu_fn(p; kwargs...)
+    next_idx = Threads.Atomic{Int}(0)
+    Threads.@sync begin
+        for _ in 1:max(1, n_cpu_workers)
+            Threads.@spawn begin
+                while true
+                    idx = Threads.atomic_add!(next_idx, 1) + 1
+                    idx > length(jobs) && break
+                    out[idx] = f_cpu(jobs[idx], idx)
+                end
             end
         end
-    else
-        if !has_gpu_fn
-            log_line(log_io, "[execution] device=auto with no GPU kernel; using CPU.", threaded=threaded)
-            return cpu_fn
+        if use_gpu_worker
+            Threads.@spawn begin
+                while true
+                    idx = Threads.atomic_add!(next_idx, 1) + 1
+                    idx > length(jobs) && break
+                    out[idx] = f_gpu(jobs[idx], idx)
+                end
+            end
         end
-        gpu_fn = getfield(SimOUBR, :run_ensemble_oubr_gpu)
-        log_line(log_io, "[execution] device=auto detected GPU path; runtime errors fall back to CPU.", threaded=threaded)
-        return (p; kwargs...) -> begin
+    end
+    return out
+end
+
+function resolve_run_ensemble_backends(device::Symbol, log_io::Union{IO,Nothing}; threaded::Bool = false)
+    cpu_fn = SimOUBR.run_ensemble_oubr
+    has_gpu_fn = isdefined(SimOUBR, :run_ensemble_oubr_gpu)
+    gpu_ready = has_gpu_fn
+    if has_gpu_fn && isdefined(SimOUBR, :gpu_backend_ready)
+        try
+            gpu_ready = getfield(SimOUBR, :gpu_backend_ready)()
+        catch
+            gpu_ready = false
+        end
+    end
+
+    gpu_fallback_fn = cpu_fn
+    if has_gpu_fn && gpu_ready
+        gpu_raw = getfield(SimOUBR, :run_ensemble_oubr_gpu)
+        gpu_fallback_fn = (p; kwargs...) -> begin
             try
-                gpu_fn(p; kwargs...)
+                gpu_raw(p; kwargs...)
             catch
                 cpu_fn(p; kwargs...)
             end
         end
     end
+
+    if device == :cpu
+        return (primary=cpu_fn, cpu=cpu_fn, gpu=gpu_fallback_fn, hybrid=false, gpu_ready=false)
+    elseif device == :gpu
+        if !has_gpu_fn || !gpu_ready
+            log_line(log_io, "[execution] GPU requested but backend is unavailable; falling back to CPU."; threaded=threaded)
+            return (primary=cpu_fn, cpu=cpu_fn, gpu=gpu_fallback_fn, hybrid=false, gpu_ready=false)
+        end
+        log_line(log_io, "[execution] Using GPU kernel when available; runtime errors fall back to CPU."; threaded=threaded)
+        return (primary=gpu_fallback_fn, cpu=cpu_fn, gpu=gpu_fallback_fn, hybrid=false, gpu_ready=true)
+    elseif device == :auto
+        if !has_gpu_fn || !gpu_ready
+            log_line(log_io, "[execution] device=auto with no GPU kernel; using CPU.", threaded=threaded)
+            return (primary=cpu_fn, cpu=cpu_fn, gpu=gpu_fallback_fn, hybrid=false, gpu_ready=false)
+        end
+        log_line(log_io, "[execution] device=auto detected GPU path; using GPU with CPU fallback.", threaded=threaded)
+        return (primary=gpu_fallback_fn, cpu=cpu_fn, gpu=gpu_fallback_fn, hybrid=false, gpu_ready=true)
+    else
+        if !has_gpu_fn || !gpu_ready
+            log_line(log_io, "[execution] device=hybrid requested but GPU backend unavailable; using CPU only.", threaded=threaded)
+            return (primary=cpu_fn, cpu=cpu_fn, gpu=gpu_fallback_fn, hybrid=false, gpu_ready=false)
+        end
+        log_line(log_io, "[execution] device=hybrid enabled: CPU workers + dedicated GPU worker.", threaded=threaded)
+        return (primary=gpu_fallback_fn, cpu=cpu_fn, gpu=gpu_fallback_fn, hybrid=true, gpu_ready=true)
+    end
+end
+
+function resolve_run_ensemble_fn(device::Symbol, log_io::Union{IO,Nothing}; threaded::Bool = false)
+    return resolve_run_ensemble_backends(device, log_io; threaded=threaded).primary
 end
 
 @inline function sample_col_range(time_grid::Vector{Float64}, t0::Float64, t1::Float64)
@@ -918,12 +978,13 @@ function compute_combo_row(
     parallel_mode::Symbol = :serial,
     parallel_level::Symbol = :panels,
     max_threads_outer::Int = 1,
+    allow_n_parallel::Bool = true,
     log_io::Union{IO,Nothing} = nothing,
     log_enabled::Bool = true,
     threaded_logging::Bool = false,
 )
     n_workers_n = 1
-    if parallel_mode == :threads && parallel_level == :n
+    if allow_n_parallel && parallel_mode == :threads && parallel_level == :n
         n_workers_n = min(length(run_N_list), max_threads_outer, Threads.nthreads())
     end
 
@@ -1340,7 +1401,9 @@ function main()
             log_line(log_io, "device: $(execution_opts.device)")
             log_line(log_io, "============================================================"; flush_now=true)
 
-            run_ensemble_fn = resolve_run_ensemble_fn(execution_opts.device, log_io; threaded=execution_opts.threaded_logging)
+            backends = resolve_run_ensemble_backends(execution_opts.device, log_io; threaded=execution_opts.threaded_logging)
+            run_ensemble_fn = backends.primary
+            allow_n_parallel = execution_opts.device != :hybrid
 
             if execution_opts.benchmark_mode && !isempty(point_models)
                 m0 = point_models[1]
@@ -1372,61 +1435,136 @@ function main()
                 log_line(log_io, "Benchmark written: $(joinpath(outdir, "benchmark_summary.txt"))")
             end
 
-            if execution_opts.parallel_level == :points
-                jobs = collect(1:length(point_models))
-                n_workers = effective_worker_count(execution_opts, length(jobs))
-                row_blocks = threaded_collect(jobs, n_workers) do pi, _
-                    model = point_models[pi]
-                    local_rows = NamedTuple[]
-                    local_log_enabled = (n_workers == 1) || execution_opts.threaded_logging
-                    if local_log_enabled
+            point_job_rows = function (pi::Int, run_fn::Function, total_workers::Int, worker_tag::String)
+                model = point_models[pi]
+                local_rows = NamedTuple[]
+                local_log_enabled = (total_workers == 1) || execution_opts.threaded_logging
+                if local_log_enabled
+                    if backends.hybrid && total_workers > 1
+                        logf(log_io, "[%s] [point %d/%d] label=%s c0=%.3f eta=%.4f sigma=%.4f",
+                             worker_tag, pi, length(point_models), model.pt.label, model.pt.c0, model.pt.eta, model.pt.sigma;
+                             threaded=execution_opts.threaded_logging)
+                    else
                         logf(log_io, "[point %d/%d] label=%s c0=%.3f eta=%.4f sigma=%.4f",
                              pi, length(point_models), model.pt.label, model.pt.c0, model.pt.eta, model.pt.sigma;
                              threaded=execution_opts.threaded_logging)
                     end
-                    kappa_star_analytic = kappa_star_analytic_enabled ? model.kappa_theory : NaN
-                    for dt in dt_list
-                        for impl in impl_list
-                            row = compute_combo_row(
-                                model.p,
-                                model.pt;
-                                kappa_theory=model.kappa_theory,
-                                dt=dt,
-                                impl=impl,
-                                panel_N_list=panel_N_list,
-                                alpha_N_list=alpha_N_list,
-                                run_N_list=run_N_list,
-                                seeds=seeds,
-                                seed_base_pt=model.seed_base_pt,
-                                mt_stride=mt_stride,
-                                burn_in=burn_in,
-                                sample=sample,
-                                ordered_value=ordered_value,
-                                growth_cfg=growth_cfg,
-                                scan_cfg=scan_cfg,
-                                station_cfg=station_cfg,
-                                beta_cfg=beta_cfg,
-                                psd_cfg=psd_cfg,
-                                thresholds=thresholds,
-                                compute_hysteresis=compute_hysteresis,
-                                compute_psd=compute_psd,
-                                compute_beta=compute_beta,
-                                compute_alpha=compute_alpha,
-                                kappa_star_analytic=kappa_star_analytic,
-                                run_ensemble_fn=run_ensemble_fn,
-                                parallel_mode=execution_opts.parallel_mode,
-                                parallel_level=execution_opts.parallel_level,
-                                max_threads_outer=execution_opts.max_threads_outer,
-                                log_io=log_io,
-                                log_enabled=local_log_enabled,
-                                threaded_logging=execution_opts.threaded_logging,
-                            )
-                            push!(local_rows, row)
-                        end
-                    end
-                    return local_rows
                 end
+                kappa_star_analytic = kappa_star_analytic_enabled ? model.kappa_theory : NaN
+                for dt in dt_list
+                    for impl in impl_list
+                        row = compute_combo_row(
+                            model.p,
+                            model.pt;
+                            kappa_theory=model.kappa_theory,
+                            dt=dt,
+                            impl=impl,
+                            panel_N_list=panel_N_list,
+                            alpha_N_list=alpha_N_list,
+                            run_N_list=run_N_list,
+                            seeds=seeds,
+                            seed_base_pt=model.seed_base_pt,
+                            mt_stride=mt_stride,
+                            burn_in=burn_in,
+                            sample=sample,
+                            ordered_value=ordered_value,
+                            growth_cfg=growth_cfg,
+                            scan_cfg=scan_cfg,
+                            station_cfg=station_cfg,
+                            beta_cfg=beta_cfg,
+                            psd_cfg=psd_cfg,
+                            thresholds=thresholds,
+                            compute_hysteresis=compute_hysteresis,
+                            compute_psd=compute_psd,
+                            compute_beta=compute_beta,
+                            compute_alpha=compute_alpha,
+                            kappa_star_analytic=kappa_star_analytic,
+                            run_ensemble_fn=run_fn,
+                            parallel_mode=execution_opts.parallel_mode,
+                            parallel_level=execution_opts.parallel_level,
+                            max_threads_outer=execution_opts.max_threads_outer,
+                            allow_n_parallel=allow_n_parallel,
+                            log_io=log_io,
+                            log_enabled=local_log_enabled,
+                            threaded_logging=execution_opts.threaded_logging,
+                        )
+                        push!(local_rows, row)
+                    end
+                end
+                return local_rows
+            end
 
+            panel_job_row = function (job::NamedTuple, run_fn::Function, total_workers::Int, worker_tag::String)
+                model = point_models[job.pi]
+                kappa_star_analytic = kappa_star_analytic_enabled ? model.kappa_theory : NaN
+                local_log_enabled = (total_workers == 1) || execution_opts.threaded_logging
+                if local_log_enabled
+                    if backends.hybrid && total_workers > 1
+                        logf(log_io, "[%s] [point %d/%d] label=%s dt=%.4g impl=%s",
+                             worker_tag, job.pi, length(point_models), model.pt.label, job.dt, String(job.impl);
+                             threaded=execution_opts.threaded_logging)
+                    else
+                        logf(log_io, "[point %d/%d] label=%s dt=%.4g impl=%s",
+                             job.pi, length(point_models), model.pt.label, job.dt, String(job.impl);
+                             threaded=execution_opts.threaded_logging)
+                    end
+                end
+                return compute_combo_row(
+                    model.p,
+                    model.pt;
+                    kappa_theory=model.kappa_theory,
+                    dt=job.dt,
+                    impl=job.impl,
+                    panel_N_list=panel_N_list,
+                    alpha_N_list=alpha_N_list,
+                    run_N_list=run_N_list,
+                    seeds=seeds,
+                    seed_base_pt=model.seed_base_pt,
+                    mt_stride=mt_stride,
+                    burn_in=burn_in,
+                    sample=sample,
+                    ordered_value=ordered_value,
+                    growth_cfg=growth_cfg,
+                    scan_cfg=scan_cfg,
+                    station_cfg=station_cfg,
+                    beta_cfg=beta_cfg,
+                    psd_cfg=psd_cfg,
+                    thresholds=thresholds,
+                    compute_hysteresis=compute_hysteresis,
+                    compute_psd=compute_psd,
+                    compute_beta=compute_beta,
+                    compute_alpha=compute_alpha,
+                    kappa_star_analytic=kappa_star_analytic,
+                    run_ensemble_fn=run_fn,
+                    parallel_mode=execution_opts.parallel_mode,
+                    parallel_level=execution_opts.parallel_level,
+                    max_threads_outer=execution_opts.max_threads_outer,
+                    allow_n_parallel=allow_n_parallel,
+                    log_io=log_io,
+                    log_enabled=local_log_enabled,
+                    threaded_logging=execution_opts.threaded_logging,
+                )
+            end
+
+            if execution_opts.parallel_level == :points
+                jobs = collect(1:length(point_models))
+                use_hybrid = backends.hybrid && execution_opts.parallel_mode == :threads && length(jobs) > 1
+                if use_hybrid
+                    n_cpu_workers = hybrid_cpu_worker_count(execution_opts, length(jobs))
+                    total_workers = n_cpu_workers + 1
+                    row_blocks = hybrid_collect(
+                        jobs,
+                        n_cpu_workers,
+                        true,
+                        (pi, _) -> point_job_rows(pi, backends.cpu, total_workers, "cpu"),
+                        (pi, _) -> point_job_rows(pi, backends.gpu, total_workers, "gpu"),
+                    )
+                else
+                    n_workers = effective_worker_count(execution_opts, length(jobs))
+                    row_blocks = threaded_collect(jobs, n_workers) do pi, _
+                        point_job_rows(pi, run_ensemble_fn, n_workers, "single")
+                    end
+                end
                 for rows in row_blocks
                     append!(results_rows, rows)
                 end
@@ -1440,50 +1578,22 @@ function main()
                     end
                 end
 
-                n_workers = effective_worker_count(execution_opts, length(jobs))
-                panel_rows = threaded_collect(jobs, n_workers) do job, _
-                    model = point_models[job.pi]
-                    kappa_star_analytic = kappa_star_analytic_enabled ? model.kappa_theory : NaN
-                    local_log_enabled = (n_workers == 1) || execution_opts.threaded_logging
-                    if local_log_enabled
-                        logf(log_io, "[point %d/%d] label=%s dt=%.4g impl=%s",
-                             job.pi, length(point_models), model.pt.label, job.dt, String(job.impl);
-                             threaded=execution_opts.threaded_logging)
-                    end
-                    return compute_combo_row(
-                        model.p,
-                        model.pt;
-                        kappa_theory=model.kappa_theory,
-                        dt=job.dt,
-                        impl=job.impl,
-                        panel_N_list=panel_N_list,
-                        alpha_N_list=alpha_N_list,
-                        run_N_list=run_N_list,
-                        seeds=seeds,
-                        seed_base_pt=model.seed_base_pt,
-                        mt_stride=mt_stride,
-                        burn_in=burn_in,
-                        sample=sample,
-                        ordered_value=ordered_value,
-                        growth_cfg=growth_cfg,
-                        scan_cfg=scan_cfg,
-                        station_cfg=station_cfg,
-                        beta_cfg=beta_cfg,
-                        psd_cfg=psd_cfg,
-                        thresholds=thresholds,
-                        compute_hysteresis=compute_hysteresis,
-                        compute_psd=compute_psd,
-                        compute_beta=compute_beta,
-                        compute_alpha=compute_alpha,
-                        kappa_star_analytic=kappa_star_analytic,
-                        run_ensemble_fn=run_ensemble_fn,
-                        parallel_mode=execution_opts.parallel_mode,
-                        parallel_level=execution_opts.parallel_level,
-                        max_threads_outer=execution_opts.max_threads_outer,
-                        log_io=log_io,
-                        log_enabled=local_log_enabled,
-                        threaded_logging=execution_opts.threaded_logging,
+                use_hybrid = backends.hybrid && execution_opts.parallel_mode == :threads && length(jobs) > 1
+                if use_hybrid
+                    n_cpu_workers = hybrid_cpu_worker_count(execution_opts, length(jobs))
+                    total_workers = n_cpu_workers + 1
+                    panel_rows = hybrid_collect(
+                        jobs,
+                        n_cpu_workers,
+                        true,
+                        (job, _) -> panel_job_row(job, backends.cpu, total_workers, "cpu"),
+                        (job, _) -> panel_job_row(job, backends.gpu, total_workers, "gpu"),
                     )
+                else
+                    n_workers = effective_worker_count(execution_opts, length(jobs))
+                    panel_rows = threaded_collect(jobs, n_workers) do job, _
+                        panel_job_row(job, run_ensemble_fn, n_workers, "single")
+                    end
                 end
                 append!(results_rows, panel_rows)
             else
@@ -1523,6 +1633,7 @@ function main()
                                 parallel_mode=execution_opts.parallel_mode,
                                 parallel_level=execution_opts.parallel_level,
                                 max_threads_outer=execution_opts.max_threads_outer,
+                                allow_n_parallel=allow_n_parallel,
                                 log_io=log_io,
                                 log_enabled=true,
                                 threaded_logging=execution_opts.threaded_logging,
@@ -1609,7 +1720,9 @@ function main()
         log_line(log_io, "device: $(execution_opts.device)")
         log_line(log_io, "============================================================"; flush_now=true)
 
-        run_ensemble_fn = resolve_run_ensemble_fn(execution_opts.device, log_io; threaded=execution_opts.threaded_logging)
+        backends = resolve_run_ensemble_backends(execution_opts.device, log_io; threaded=execution_opts.threaded_logging)
+        run_ensemble_fn = backends.primary
+        allow_n_parallel = execution_opts.device != :hybrid
 
         if execution_opts.benchmark_mode
             maybe_run_panel_benchmark(
@@ -1647,9 +1760,17 @@ function main()
             end
         end
 
-        n_workers = execution_opts.parallel_level == :panels ? effective_worker_count(execution_opts, length(jobs)) : 1
-        combo_rows = threaded_collect(jobs, n_workers) do job, _
-            local_log_enabled = (n_workers == 1) || execution_opts.threaded_logging
+        combo_job_row = function (job::NamedTuple, run_fn::Function, total_workers::Int, worker_tag::String)
+            local_log_enabled = (total_workers == 1) || execution_opts.threaded_logging
+            if local_log_enabled
+                if backends.hybrid && total_workers > 1
+                    logf(log_io, "[%s] [legacy] dt=%.4g impl=%s", worker_tag, job.dt, String(job.impl);
+                         threaded=execution_opts.threaded_logging)
+                else
+                    logf(log_io, "[legacy] dt=%.4g impl=%s", job.dt, String(job.impl);
+                         threaded=execution_opts.threaded_logging)
+                end
+            end
             return compute_combo_row(
                 p,
                 pt_legacy;
@@ -1676,14 +1797,40 @@ function main()
                 compute_beta=true,
                 compute_alpha=true,
                 kappa_star_analytic=kappa_theory,
-                run_ensemble_fn=run_ensemble_fn,
+                run_ensemble_fn=run_fn,
                 parallel_mode=execution_opts.parallel_mode,
                 parallel_level=execution_opts.parallel_level,
                 max_threads_outer=execution_opts.max_threads_outer,
+                allow_n_parallel=allow_n_parallel,
                 log_io=log_io,
                 log_enabled=local_log_enabled,
                 threaded_logging=execution_opts.threaded_logging,
             )
+        end
+
+        if execution_opts.parallel_level == :panels
+            use_hybrid = backends.hybrid && execution_opts.parallel_mode == :threads && length(jobs) > 1
+            if use_hybrid
+                n_cpu_workers = hybrid_cpu_worker_count(execution_opts, length(jobs))
+                total_workers = n_cpu_workers + 1
+                combo_rows = hybrid_collect(
+                    jobs,
+                    n_cpu_workers,
+                    true,
+                    (job, _) -> combo_job_row(job, backends.cpu, total_workers, "cpu"),
+                    (job, _) -> combo_job_row(job, backends.gpu, total_workers, "gpu"),
+                )
+            else
+                n_workers = effective_worker_count(execution_opts, length(jobs))
+                combo_rows = threaded_collect(jobs, n_workers) do job, _
+                    combo_job_row(job, run_ensemble_fn, n_workers, "single")
+                end
+            end
+        else
+            combo_rows = Vector{Any}(undef, length(jobs))
+            for i in eachindex(jobs)
+                combo_rows[i] = combo_job_row(jobs[i], run_ensemble_fn, 1, "single")
+            end
         end
         append!(results_rows, combo_rows)
     end

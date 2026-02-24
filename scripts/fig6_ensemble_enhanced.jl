@@ -25,15 +25,9 @@ using BeliefSim.Types
 using BeliefSim.Stats
 using BeliefSim.Hazard: ν
 
-if !isdefined(Main, :EnsembleUtils)
-    include(joinpath(@__DIR__, "ensemble_utils.jl"))
-end
-if !isdefined(Main, :StatisticalTests)
-    include(joinpath(@__DIR__, "statistical_tests.jl"))
-end
-if !isdefined(Main, :Visualization)
-    include(joinpath(@__DIR__, "visualization.jl"))
-end
+include(joinpath(@__DIR__, "ensemble_utils.jl"))
+include(joinpath(@__DIR__, "statistical_tests.jl"))
+include(joinpath(@__DIR__, "visualization.jl"))
 
 using .EnsembleUtils
 using .StatisticalTests
@@ -74,34 +68,15 @@ convergence_slope_tol = 1e-4
 extend_if_not_converged = false
 
 # Ensemble settings
-# ---------------------------------------------------------------------------
-# RUN MODE  (CLI flags: -fast | -pub | -deep; combine with -pub for deep+pub)
-# ---------------------------------------------------------------------------
-RUN_MODE = :fast  # default
-if any(arg -> arg in ("-pub",  "--pub"),  ARGS); RUN_MODE = :pub;  end
-if any(arg -> arg in ("-fast", "--fast"), ARGS); RUN_MODE = :fast; end
-if any(arg -> arg in ("-deep", "--deep"), ARGS); RUN_MODE = :deep; end
-
-# Allow -deep -pub combination (deep regression, full ensemble)
-deep_mode = any(arg -> arg in ("-deep", "--deep"), ARGS)
-pub_mode  = any(arg -> arg in ("-pub",  "--pub"),  ARGS)
-
-# Ensemble sizes
-n_ensemble_scenarios = if pub_mode;    200
-                         elseif deep_mode; 50
-                         else;             20
-                         end
-n_ensemble_kappa_sweep = if pub_mode;    80
-                            elseif deep_mode; 30
-                            else;             30
-                            end
-n_rep_per_kappa_nearcrit = (pub_mode || deep_mode) ? 3 : 1
-
-# Deep-mode regression flags (also settable via CLI regardless of mode)
-deep_regression       = deep_mode
-deep_baseline_subcrit = deep_mode
-deep_bic_window       = deep_mode
-deep_consensus_test   = deep_mode
+RUN_MODE = :fast  # :fast for development, :pub for paper renders
+if any(arg -> arg in ("-pub", "--pub"), ARGS)
+    RUN_MODE = :pub
+elseif any(arg -> arg in ("-fast", "--fast"), ARGS)
+    RUN_MODE = :fast
+end
+n_ensemble_scenarios = RUN_MODE == :pub ? 200 : 20
+n_ensemble_kappa_sweep = RUN_MODE == :pub ? 80 : 10
+n_rep_per_kappa_nearcrit = RUN_MODE == :pub ? 3 : 1
 
 n_ensemble = n_ensemble_scenarios
 mt_stride = max(1, Int(round(0.05 / dt)))
@@ -135,26 +110,6 @@ density_strict_checks = true
 fit_windows = [(10.0, 50.0), (20.0, 80.0), (50.0, 150.0)]
 scaling_delta_windows = [(1e-2, 5e-2), (1e-2, 1e-1), (5e-3, 2e-1)]
 scaling_amp_floor = 1e-6
-scaling_n_min = 15
-scaling_n_target = 30
-scaling_delta_window_default = (1.0e-2, 1.2e-1)
-scaling_allow_window_expand = true
-scaling_max_window_expand = (5.0e-3, 1.5e-1)
-# Sync guard: ensure config.jl constants match this script's settings.
-const _CONFIG_LOADED_ = Ref(false)  # sentinel to avoid repeated config.jl include
-let _cfg_path = joinpath(@__DIR__, "config.jl")
-    if isfile(_cfg_path) && !_CONFIG_LOADED_[]
-        include(_cfg_path)
-        _CONFIG_LOADED_[] = true
-        @assert Config.SCALING_N_MIN == scaling_n_min "BUG: scaling_n_min mismatch — config.jl vs fig6"
-        @assert abs(Config.SCALING_WINDOW_MAX - scaling_delta_window_default[2]) < 1e-9 "BUG: scaling window upper bound mismatch — config.jl vs fig6"
-    end
-end
-scaling_saturation_filter = true
-scaling_saturation_cutoff_quantile = 0.85
-scaling_convergence_gate = true
-scaling_decided_gate = true
-scaling_pdec_min = 0.80
 
 # Scenario setup
 scenario_ratios = Dict(
@@ -182,24 +137,10 @@ mkpath(threshold_dir)
 
 # Route A (empirical growth scan) settings
 growth_scan_enabled = true
-growth_scan_factors = collect(range(0.70, 1.30; length=15))
+growth_scan_factors = collect(range(0.6, 1.4; length=9))
 growth_scan_window = (10.0, 60.0)
-growth_scan_bootstrap = 100
+growth_scan_bootstrap = 200
 growth_scan_min_points = 8
-
-# Stage toggles (CLI overrides)
-run_growth_scan = growth_scan_enabled
-run_scaling_regression = true
-reuse_scaling_data = false
-if any(arg -> arg in ("-skip-growth", "--skip-growth-scan"), ARGS)
-    run_growth_scan = false
-end
-if any(arg -> arg in ("-skip-scaling", "--skip-scaling"), ARGS)
-    run_scaling_regression = false
-end
-if any(arg -> arg in ("-reuse-scaling", "--reuse-scaling"), ARGS)
-    reuse_scaling_data = true
-end
 
 # Route B (theoretical rank-one) settings
 kappaB_L = 6.0
@@ -217,15 +158,34 @@ if fast_mode
     t_measure = 30.0
     density_bins = 120
     snapshot_times = [0.0, 20.0, 80.0, T]
-    growth_scan_bootstrap = 100
-    growth_scan_factors = collect(range(0.70, 1.30; length=15))
-    n_ensemble = max(n_ensemble, 20)  # floor for Route A reliability
+    growth_scan_bootstrap = 50
+    growth_scan_factors = collect(range(0.7, 1.3; length=7))
 end
 
-if deep_mode && !fast_mode
-    @info "DEEP_MODE enabled: finer sweep grid, profile-likelihood, WLS, Cook's D, BIC window."
-    scaling_n_min    = 15
-    scaling_n_target = 30
+function parse_device_mode(args::Vector{String})
+    for (i, arg) in enumerate(args)
+        if arg == "--device" && i < length(args)
+            dev = Symbol(lowercase(String(args[i + 1])))
+            if dev in (:cpu, :gpu, :auto)
+                return dev
+            end
+        end
+    end
+    return :auto
+end
+
+device_mode = parse_device_mode(ARGS)
+gpu_ready = EnsembleUtils.gpu_backend_ready()
+simulation_device = if device_mode == :gpu
+    gpu_ready ? :gpu : :cpu
+elseif device_mode == :auto
+    gpu_ready ? :gpu : :cpu
+else
+    :cpu
+end
+
+if device_mode == :gpu && !gpu_ready
+    @warn "--device gpu requested but CUDA backend is unavailable; using CPU."
 end
 
 function configure_parallelism(; mode::Symbol = :auto, target_threads::Int = 1, target_workers::Int = 1)
@@ -279,7 +239,7 @@ function setup_distributed(target_workers::Int)
     return
 end
 
-parallel_ensemble = configure_parallelism(
+parallel_ensemble = simulation_device == :gpu ? false : configure_parallelism(
     mode=parallel_mode,
     target_threads=parallel_target_threads,
     target_workers=parallel_target_workers,
@@ -298,7 +258,7 @@ function parallel_backend_label()
     return "serial"
 end
 
-logmsg("Parallel backend: $(parallel_backend_label()) (nprocs=$(Distributed.nprocs()), threads=$(Threads.nthreads()), parallel_ensemble=$(parallel_ensemble))")
+logmsg("Parallel backend: $(parallel_backend_label()) (nprocs=$(Distributed.nprocs()), threads=$(Threads.nthreads()), parallel_ensemble=$(parallel_ensemble), device=$(simulation_device))")
 
 # Output paths
 outdir = "outputs/ensemble_results"
@@ -544,6 +504,7 @@ function growth_scan_kappa_A(
     window::Tuple{Float64, Float64},
     n_boot::Int,
     parallel::Bool,
+    device::Symbol,
 )
     rows = Vector{NamedTuple}()
     boot_slopes = Matrix{Float64}(undef, n_boot, length(kappa_grid))
@@ -555,7 +516,7 @@ function growth_scan_kappa_A(
         res = run_ensemble_simulation(
             p;
             kappa=κ,
-            n_ensemble=max(n_ensemble, 30),
+            n_ensemble=n_ensemble,
             N=N,
             T=T,
             dt=dt,
@@ -565,6 +526,7 @@ function growth_scan_kappa_A(
             store_snapshots=false,
             track_moments=false,
             parallel=parallel,
+            device=device,
         )
         m_traj = res.mean_trajectories
         m_abs = vec(mean(abs.(m_traj); dims=1))
@@ -707,35 +669,6 @@ function write_docs(summary_path::String, report::String)
     end
 end
 
-function has_col(df::DataFrame, name::Symbol)
-    return String(name) in names(df)
-end
-
-function ols_var_covar(X::Matrix{Float64}, sigma_sq::Float64)
-    F = qr(X)
-    R = F.R
-    Ri = R \ Matrix{Float64}(I, size(R)...)
-    return sigma_sq * (Ri * Ri')
-end
-
-function sanitize_json(x)
-    if x isa Dict
-        return Dict(k => sanitize_json(v) for (k, v) in x)
-    elseif x isa AbstractVector
-        return [sanitize_json(v) for v in x]
-    elseif x isa Tuple
-        return [sanitize_json(v) for v in x]
-    elseif x isa Float64
-        return isfinite(x) ? x : nothing
-    elseif x isa Float32
-        return isfinite(x) ? x : nothing
-    elseif x isa Real
-        return isfinite(x) ? x : nothing
-    else
-        return x
-    end
-end
-
 # =============================================================================
 # ADAPTIVE SWEEP HELPERS
 # =============================================================================
@@ -747,861 +680,14 @@ function get_adaptive_T(ratio::Float64, base_T::Float64)
 end
 
 function build_dense_sweep_ratios(kappa_star_B::Float64, kappa_star_ref::Float64)
-    # 60 points in the valid pitchfork window; 20 diagnostic points beyond
-    deltas_core  = exp.(range(log(5.0e-3), log(1.5e-1); length=60))
-    deltas_tail  = exp.(range(log(1.6e-1), log(5.0e-1); length=20))
-    deltas_above = vcat(deltas_core, deltas_tail)
-    # 12 subcritical points: deep tail for stable m0, dense near threshold
-    deltas_below = vcat(
-        range(-0.40, -0.20; length = 5) |> collect,
-        range(-0.18, -0.016; length = 7) |> collect,
-    )
+    deltas_above = [1e-3, 2e-3, 4e-3, 8e-3, 1.6e-2, 3.2e-2, 6.4e-2, 1e-1, 0.15, 0.20]
+    deltas_below = [-1e-1, -6.4e-2, -3.2e-2, -1.6e-2, -8e-3, -4e-3]
     kappas_near = kappa_star_B .* (1 .+ vcat(deltas_below, deltas_above))
     ratios_near = kappas_near ./ kappa_star_ref
 
     ratios = vcat(sweep_ratios, ratios_near)
     ratios = filter(r -> r > 0.0 && r <= sweep_ratio_cap, ratios)
     return sort(unique(ratios))
-end
-
-function build_scaling_grid(
-    kappa_star::Float64;
-    delta_min::Float64 = scaling_delta_window_default[1],
-    delta_max::Float64 = scaling_delta_window_default[2],
-    n_target::Int = scaling_n_target,
-)
-    deltas = exp.(range(log(delta_min), log(delta_max), length=n_target))
-    kappas = kappa_star .* (1 .+ deltas)
-    return kappas, deltas
-end
-
-function build_scaling_baseline_grid(
-    kappa_star::Float64;
-    delta_min::Float64 = scaling_delta_window_default[1],
-    delta_max::Float64 = 0.5 * scaling_delta_window_default[2],
-    n_sub::Int = 24,
-)
-    deltas = -exp.(range(log(delta_min), log(delta_max), length=n_sub))
-    kappas = kappa_star .* (1 .+ deltas)
-    return kappas, deltas
-end
-
-function compute_m_abs_star(mean_traj::Matrix{Float64}, time_grid::Vector{Float64})
-    idx = late_window_indices(time_grid)
-    n_runs = size(mean_traj, 1)
-    mbar = [mean(abs.(mean_traj[i, idx])) for i in 1:n_runs]
-    mean_abs_traj = vec(mean(abs.(mean_traj); dims=1))
-    m_abs_star = mean(mbar)
-    m_abs_ci = n_runs > 1 ? 1.96 * std(mbar; corrected=true) / sqrt(n_runs) : NaN
-    return mbar, m_abs_star, m_abs_ci, mean_abs_traj
-end
-
-function run_scaling_point(
-    p::Params;
-    kappa::Float64,
-    N::Int,
-    T::Float64,
-    dt::Float64,
-    n_ensemble::Int,
-    base_seed::Int,
-    snapshot_times::Vector{Float64},
-    mt_stride::Int,
-    parallel::Bool,
-    pdec_min::Float64,
-)
-    T_try = T
-    attempt = 0
-    converged = false
-    decided_ok = false
-    res = nothing
-    m_abs_star = NaN
-    m_abs_ci = NaN
-    decided_share = NaN
-    p_plus = NaN
-    p_minus = NaN
-    imbalance = NaN
-
-    while true
-        res = run_ensemble_simulation(
-            p;
-            kappa=kappa,
-            n_ensemble=n_ensemble,
-            N=N,
-            T=T_try,
-            dt=dt,
-            base_seed=base_seed,
-            snapshot_times=snapshot_times,
-            mt_stride=mt_stride,
-            store_snapshots=false,
-            track_moments=false,
-            parallel=parallel,
-        )
-
-        _, m_abs_star, m_abs_ci, mean_abs_traj = compute_m_abs_star(res.mean_trajectories, res.time_grid)
-        converged = is_converged(res.time_grid, mean_abs_traj; frac=0.1, tol_rel=convergence_slope_tol)
-
-        signs, mean_late, decided, tau_used, decided_share, plus_share, minus_share, undecided_share =
-            compute_branch_signs(res.mean_trajectories, res.time_grid)
-        p_plus = plus_share
-        p_minus = minus_share
-        imbalance = plus_share - minus_share
-        decided_ok = decided_share >= pdec_min
-
-        if (!scaling_convergence_gate || converged) && (!scaling_decided_gate || decided_ok)
-            break
-        end
-
-        if T_try >= T_max || attempt >= 2
-            break
-        end
-
-        if attempt == 0
-            T_try = min(T_max, T_try * 1.5)
-        else
-            T_try = min(T_max, T_try * 2.0)
-        end
-        attempt += 1
-    end
-
-    return (
-        m_abs_star = m_abs_star,
-        m_abs_ci = m_abs_ci,
-        converged = converged,
-        decided_ok = decided_ok,
-        decided_share = decided_share,
-        p_plus = p_plus,
-        p_minus = p_minus,
-        imbalance = imbalance,
-        T_used = T_try,
-        attempts = attempt,
-    )
-end
-
-function run_scaling_grid(
-    p::Params,
-    kappas::Vector{Float64},
-    deltas::Vector{Float64},
-    kappa_star::Float64;
-    label::String,
-    N::Int,
-    T::Float64,
-    dt::Float64,
-    n_ensemble::Int,
-    base_seed::Int,
-    snapshot_times::Vector{Float64},
-    mt_stride::Int,
-    parallel::Bool,
-    pdec_min::Float64,
-)
-    rows = Vector{NamedTuple}()
-    for (idx, κ) in enumerate(kappas)
-        if LOG_PROGRESS
-            logmsg("Scaling grid $(label) $(idx)/$(length(kappas)) at kappa=$(round(κ, digits=5))")
-        end
-        res = run_scaling_point(
-            p;
-            kappa=κ,
-            N=N,
-            T=T,
-            dt=dt,
-            n_ensemble=n_ensemble,
-            base_seed=base_seed + 10000 * idx,
-            snapshot_times=snapshot_times,
-            mt_stride=mt_stride,
-            parallel=parallel,
-            pdec_min=pdec_min,
-        )
-        delta_abs = κ - kappa_star
-        delta_rel = delta_abs / kappa_star
-        push!(rows, (
-            kappa=κ,
-            delta_rel=delta_rel,
-            delta_abs=delta_abs,
-            m_abs_star=res.m_abs_star,
-            m_abs_ci=res.m_abs_ci,
-            converged=res.converged,
-            decided_ok=res.decided_ok,
-            decided_share=res.decided_share,
-            p_plus=res.p_plus,
-            p_minus=res.p_minus,
-            imbalance=res.imbalance,
-            n_ensemble=n_ensemble,
-            T_used=res.T_used,
-            attempts=res.attempts,
-        ))
-    end
-    return rows
-end
-
-function select_scaling_points(
-    df::DataFrame;
-    delta_window::Tuple{Float64, Float64},
-    amp_floor::Float64 = scaling_amp_floor,
-    saturation_filter::Bool = scaling_saturation_filter,
-    saturation_cutoff_quantile::Float64 = scaling_saturation_cutoff_quantile,
-    convergence_gate::Bool = scaling_convergence_gate,
-    decided_gate::Bool = scaling_decided_gate,
-    pdec_min::Float64 = scaling_pdec_min,
-)
-    mask = isfinite.(df.m_corr) .& isfinite.(df.kappa) .& isfinite.(df.delta_abs)
-    mask .&= df.delta_rel .>= delta_window[1]
-    mask .&= df.delta_rel .<= delta_window[2]
-    mask .&= df.delta_abs .> 0.0
-    mask .&= df.m_corr .> amp_floor
-
-    count_window = sum(mask)
-
-    if convergence_gate && hasproperty(df, :converged)
-        mask .&= df.converged
-    end
-    count_converged = sum(mask)
-
-    if decided_gate && hasproperty(df, :decided_share)
-        mask .&= df.decided_share .>= pdec_min
-    end
-    count_decided = sum(mask)
-
-    sat_threshold = NaN
-    if saturation_filter
-        vals = df.m_corr[mask]
-        if !isempty(vals)
-            sat_threshold = quantile(vals, saturation_cutoff_quantile)
-            mask .&= df.m_corr .<= sat_threshold
-        end
-    end
-    count_saturation = sum(mask)
-
-    stats = (
-        window_count=count_window,
-        converged_count=count_converged,
-        decided_count=count_decided,
-        saturation_count=count_saturation,
-        saturation_threshold=sat_threshold,
-    )
-    return mask, stats
-end
-
-function fit_scaling_ols(x::Vector{Float64}, y::Vector{Float64})
-    n = length(x)
-    X = hcat(ones(n), x)
-    coeffs = X \ y
-    y_pred = X * coeffs
-    residuals = y .- y_pred
-    ss_res = sum(residuals .^ 2)
-    ss_tot = sum((y .- mean(y)).^ 2)
-    r2 = ss_tot > 0 ? 1 - ss_res / ss_tot : NaN
-    sigma_sq = ss_res / max(1, n - 2)
-    var_covar = ols_var_covar(X, sigma_sq)
-    se_alpha = sqrt(var_covar[1, 1])
-    se_beta = sqrt(var_covar[2, 2])
-    t_stat = (coeffs[2] - 0.5) / se_beta
-    df = n - 2
-    p_value = 2.0 * ccdf(TDist(df), abs(t_stat))
-    t_crit = quantile(TDist(df), 0.975)
-    ci_lower = coeffs[2] - t_crit * se_beta
-    ci_upper = coeffs[2] + t_crit * se_beta
-    return (
-        alpha=coeffs[1],
-        beta_hat=coeffs[2],
-        beta_se=se_beta,
-        beta_ci=(ci_lower, ci_upper),
-        t_statistic=t_stat,
-        p_value=p_value,
-        r2=r2,
-        n_points=n,
-    )
-end
-
-
-# ===========================================================================
-# DEEP β ESTIMATORS  (FM1–FM6 fixes)
-# ===========================================================================
-
-function _cooks_d_mask(X::Matrix{Float64}, y::Vector{Float64}; threshold::Float64 = 4.0 / length(y))
-    n, p = size(X)
-    coeffs = X \ y
-    y_pred = X * coeffs
-    residuals = y .- y_pred
-    ss_res = sum(residuals .^ 2)
-    sigma2 = ss_res / max(1, n - p)
-    H = X * inv(X' * X) * X'
-    leverage = diag(H)
-    D = (residuals .^ 2 ./ (p * sigma2)) .* (leverage ./ (1 .- leverage .+ 1e-12) .^ 2)
-    return D .<= threshold, D
-end
-
-function _fit_ols_cooks_d(
-    κ_all::Vector{Float64},
-    m_all::Vector{Float64},
-    κ_star::Float64;
-    δ_lo::Float64 = 1e-2,
-    δ_hi::Float64 = 1e-1,
-    amp_floor::Float64 = 1e-8,
-    min_points::Int = 4,
-)
-    δ = (κ_all .- κ_star) ./ κ_star
-    mask = (δ .>= δ_lo) .& (δ .<= δ_hi) .& (δ .> 0) .& (m_all .> amp_floor)
-
-    if sum(mask) < min_points
-        return (beta_hat=NaN, beta_se=NaN, beta_ci=(NaN, NaN),
-                t_statistic=NaN, p_value=NaN, n_points=0, C=NaN,
-                method=:ols_cooks, kappa_star_eff=κ_star, n_removed=0)
-    end
-
-    log_δ = log.(δ[mask])
-    log_m = log.(m_all[mask])
-    valid = isfinite.(log_δ) .& isfinite.(log_m)
-    log_δ, log_m = log_δ[valid], log_m[valid]
-    n = length(log_δ)
-    if n < min_points
-        return (beta_hat=NaN, beta_se=NaN, beta_ci=(NaN, NaN),
-                t_statistic=NaN, p_value=NaN, n_points=0, C=NaN,
-                method=:ols_cooks, kappa_star_eff=κ_star, n_removed=0)
-    end
-
-    X = hcat(ones(n), log_δ)
-    keep, D = _cooks_d_mask(X, log_m)
-    n_removed = sum(.!keep)
-    log_δ, log_m = log_δ[keep], log_m[keep]
-    n = length(log_δ)
-    if n < min_points
-        return (beta_hat=NaN, beta_se=NaN, beta_ci=(NaN, NaN),
-                t_statistic=NaN, p_value=NaN, n_points=n, C=NaN,
-                method=:ols_cooks, kappa_star_eff=κ_star, n_removed=n_removed)
-    end
-
-    result = fit_scaling_ols(log_δ, log_m)
-    return merge(result, (method=:ols_cooks, kappa_star_eff=κ_star, n_removed=n_removed, C=exp(result.alpha)))
-end
-
-function _fit_wls(
-    κ_all::Vector{Float64},
-    m_all::Vector{Float64},
-    se_all::Vector{Float64},
-    κ_star::Float64;
-    δ_lo::Float64 = 1e-2,
-    δ_hi::Float64 = 1e-1,
-    amp_floor::Float64 = 1e-8,
-)
-    δ = (κ_all .- κ_star) ./ κ_star
-    mask = (δ .>= δ_lo) .& (δ .<= δ_hi) .& (δ .> 0) .& (m_all .> amp_floor) .& (se_all .> 0)
-
-    if sum(mask) < 4
-        return (beta_hat=NaN, beta_se=NaN, beta_ci=(NaN, NaN),
-                t_statistic=NaN, p_value=NaN, n_points=0, C=NaN,
-                method=:wls, kappa_star_eff=κ_star)
-    end
-
-    log_δ = log.(δ[mask])
-    log_m = log.(m_all[mask])
-    se_m = se_all[mask]
-    se_log_m = se_m ./ m_all[mask]
-    w = 1.0 ./ (se_log_m .^ 2)
-    w = w ./ sum(w) .* length(w)
-
-    valid = isfinite.(log_δ) .& isfinite.(log_m) .& isfinite.(w) .& (w .> 0)
-    log_δ, log_m, w = log_δ[valid], log_m[valid], w[valid]
-    n = length(log_δ)
-    if n < 4
-        return (beta_hat=NaN, beta_se=NaN, beta_ci=(NaN, NaN),
-                t_statistic=NaN, p_value=NaN, n_points=n, C=NaN,
-                method=:wls, kappa_star_eff=κ_star)
-    end
-
-    W = Diagonal(w)
-    X = hcat(ones(n), log_δ)
-    XtWX = X' * W * X
-    coeffs = XtWX \ (X' * W * log_m)
-    log_C_hat, β_hat = coeffs[1], coeffs[2]
-
-    res = log_m .- X * coeffs
-    σ2_wls = dot(w, res .^ 2) / max(1, n - 2)
-    var_β = σ2_wls * inv(XtWX)[2, 2]
-    se_β = sqrt(max(var_β, 0.0))
-    t_stat = (β_hat - 0.5) / max(se_β, 1e-12)
-    df = n - 2
-    p_val = 2.0 * ccdf(TDist(df), abs(t_stat))
-    t_crit = quantile(TDist(df), 0.975)
-    return (
-        beta_hat = β_hat,
-        beta_se = se_β,
-        beta_ci = (β_hat - t_crit * se_β, β_hat + t_crit * se_β),
-        t_statistic = t_stat,
-        p_value = p_val,
-        n_points = n,
-        C = exp(log_C_hat),
-        method = :wls,
-        kappa_star_eff = κ_star,
-    )
-end
-
-function _fit_profile_likelihood(
-    κ_all::Vector{Float64},
-    m_all::Vector{Float64},
-    se_all::Vector{Float64};
-    δ_lo::Float64 = 1e-2,
-    δ_hi::Float64 = 1e-1,
-    κ_lo::Float64 = NaN,
-    κ_hi::Float64 = NaN,
-    n_κ::Int = 80,
-    amp_floor::Float64 = 1e-8,
-)
-    if !isfinite(κ_lo) || !isfinite(κ_hi) || κ_lo >= κ_hi
-        return (beta_hat=NaN, beta_se=NaN, beta_ci=(NaN, NaN),
-                t_statistic=NaN, p_value=NaN, n_points=0, C=NaN,
-                kappa_star_eff=NaN, method=:profile_likelihood,
-                profile_grid=Float64[], profile_rss=Float64[])
-    end
-
-    κ_grid = collect(range(κ_lo, κ_hi; length=n_κ))
-    rss_grid = fill(Inf, n_κ)
-    β_grid = fill(NaN, n_κ)
-    C_grid = fill(NaN, n_κ)
-
-    for (i, κ_try) in enumerate(κ_grid)
-        δ = (κ_all .- κ_try) ./ κ_try
-        mask = (δ .>= δ_lo) .& (δ .<= δ_hi) .& (δ .> 0) .& (m_all .> amp_floor)
-        if sum(mask) < 4
-            continue
-        end
-        log_δ = log.(δ[mask])
-        log_m = log.(m_all[mask])
-        valid = isfinite.(log_δ) .& isfinite.(log_m)
-        if sum(valid) < 4
-            continue
-        end
-        log_δ, log_m = log_δ[valid], log_m[valid]
-        n_fit = length(log_δ)
-        X = hcat(ones(n_fit), log_δ)
-        coeffs = X \ log_m
-        res = log_m .- X * coeffs
-        rss_raw = sum(res .^ 2)
-        rss_grid[i] = n_fit * log(max(rss_raw / n_fit, 1e-300)) + 2.0 * log(n_fit)
-        β_grid[i] = coeffs[2]
-        C_grid[i] = exp(coeffs[1])
-    end
-
-    valid_grid = isfinite.(rss_grid)
-    if !any(valid_grid)
-        return (beta_hat=NaN, beta_se=NaN, beta_ci=(NaN, NaN),
-                t_statistic=NaN, p_value=NaN, n_points=0, C=NaN,
-                kappa_star_eff=NaN, method=:profile_likelihood,
-                profile_grid=κ_grid, profile_rss=rss_grid)
-    end
-
-    valid_idx = findall(valid_grid)
-    best_i = valid_idx[argmin(rss_grid[valid_idx])]
-    κ_star_eff = κ_grid[best_i]
-    β_best = β_grid[best_i]
-    C_best = C_grid[best_i]
-
-    best_bic = minimum(rss_grid[valid_grid])
-    κ_lo2 = max(κ_lo, κ_star_eff - (κ_hi - κ_lo) / n_κ * 3)
-    κ_hi2 = min(κ_hi, κ_star_eff + (κ_hi - κ_lo) / n_κ * 3)
-    κ_grid2 = collect(range(κ_lo2, κ_hi2; length=40))
-    for κ_try in κ_grid2
-        δ = (κ_all .- κ_try) ./ κ_try
-        mask = (δ .>= δ_lo) .& (δ .<= δ_hi) .& (δ .> 0) .& (m_all .> amp_floor)
-        if sum(mask) < 4
-            continue
-        end
-        log_δ = log.(δ[mask])
-        log_m = log.(m_all[mask])
-        valid = isfinite.(log_δ) .& isfinite.(log_m)
-        if sum(valid) < 4
-            continue
-        end
-        n_fine = sum(valid)
-        X_fine = hcat(ones(n_fine), log_δ[valid])
-        c_fine = X_fine \ log_m[valid]
-        r_fine = log_m[valid] .- X_fine * c_fine
-        rss_fine = sum(r_fine .^ 2)
-        bic_fine = n_fine * log(max(rss_fine / n_fine, 1e-300)) + 2.0 * log(n_fine)
-        if bic_fine < best_bic
-            κ_star_eff = κ_try
-            β_best = c_fine[2]
-            C_best = exp(c_fine[1])
-            best_bic = bic_fine
-        end
-    end
-
-    r_at_best = _fit_ols_cooks_d(κ_all, m_all, κ_star_eff; δ_lo=δ_lo, δ_hi=δ_hi, amp_floor=amp_floor)
-    β_se = isfinite(r_at_best.beta_se) ? r_at_best.beta_se : 0.05
-    n_pts = r_at_best.n_points
-    df = max(1, n_pts - 2)
-    t_stat = (β_best - 0.5) / max(β_se, 1e-12)
-    p_val = 2.0 * ccdf(TDist(df), abs(t_stat))
-    t_crit = quantile(TDist(df), 0.975)
-
-    return (
-        beta_hat = β_best,
-        beta_se = β_se,
-        beta_ci = (β_best - t_crit * β_se, β_best + t_crit * β_se),
-        t_statistic = t_stat,
-        p_value = p_val,
-        n_points = n_pts,
-        C = C_best,
-        kappa_star_eff = κ_star_eff,
-        method = :profile_likelihood,
-        profile_grid = κ_grid,
-        profile_rss = rss_grid,
-    )
-end
-
-function _select_bic_window(
-    κ_all::Vector{Float64},
-    m_all::Vector{Float64},
-    se_all::Vector{Float64},
-    κ_star::Float64;
-    candidate_windows::Vector{Tuple{Float64, Float64}} = [
-        (1e-2, 5e-2), (1e-2, 1e-1), (5e-3, 1e-1), (1e-2, 1.5e-1), (5e-3, 1.5e-1), (2e-2, 1e-1)
-    ],
-    amp_floor::Float64 = 1e-8,
-)
-    best_bic = Inf
-    best_window = candidate_windows[1]
-    best_r = nothing
-
-    for (δ_lo, δ_hi) in candidate_windows
-        r = _fit_ols_cooks_d(κ_all, m_all, κ_star; δ_lo=δ_lo, δ_hi=δ_hi, amp_floor=amp_floor)
-        if !isfinite(r.beta_hat) || r.n_points < 4
-            continue
-        end
-        n = r.n_points
-        δ = (κ_all .- κ_star) ./ κ_star
-        mask = (δ .>= δ_lo) .& (δ .<= δ_hi) .& (δ .> 0) .& (m_all .> amp_floor)
-        log_δ = log.(δ[mask])
-        log_m = log.(m_all[mask])
-        valid = isfinite.(log_δ) .& isfinite.(log_m)
-        if sum(valid) < 4
-            continue
-        end
-        log_δ, log_m = log_δ[valid], log_m[valid]
-        X = hcat(ones(sum(valid)), log_δ)
-        c = X \ log_m
-        rss = sum((log_m .- X * c) .^ 2)
-        bic = n * log(rss / n) + 2 * log(n)
-        if bic < best_bic
-            best_bic = bic
-            best_window = (δ_lo, δ_hi)
-            best_r = r
-        end
-    end
-
-    return best_window, best_r, best_bic
-end
-
-function _compute_deep_baseline_m0(
-    equilibrium_df::DataFrame,
-    κ_star::Float64;
-    δ_sub_lo::Float64 = -0.25,
-    δ_sub_hi::Float64 = -0.05,
-)
-    δ = (equilibrium_df.kappa .- κ_star) ./ κ_star
-    mask = (δ .>= δ_sub_lo) .& (δ .< δ_sub_hi) .& isfinite.(equilibrium_df.m_abs_star)
-    vals = filter(isfinite, equilibrium_df.m_abs_star[mask])
-    m0 = isempty(vals) ? 0.0 : median(vals)
-    @printf("[DEEP BASELINE] m0 = %.6f (from %d deep-subcritical points, δ∈[%.2f,%.2f])\n",
-            m0, length(vals), δ_sub_lo, δ_sub_hi)
-    return m0
-end
-
-function _consensus_beta_test(r_ols, r_wls, r_pl; α::Float64 = 0.05)
-    pass_ols = isfinite(r_ols.beta_hat) && r_ols.beta_ci[1] <= 0.5 <= r_ols.beta_ci[2] && r_ols.p_value > α
-    pass_wls = isfinite(r_wls.beta_hat) && r_wls.beta_ci[1] <= 0.5 <= r_wls.beta_ci[2] && r_wls.p_value > α
-    pass_pl = isfinite(r_pl.beta_hat) && r_pl.beta_ci[1] <= 0.5 <= r_pl.beta_ci[2] && r_pl.p_value > α
-
-    n_valid = sum((isfinite(r_ols.beta_hat), isfinite(r_wls.beta_hat), isfinite(r_pl.beta_hat)))
-    n_agree = pass_ols + pass_wls + pass_pl
-
-    methods_pass = Symbol[]
-    if pass_ols
-        push!(methods_pass, :ols_cooks)
-    end
-    if pass_wls
-        push!(methods_pass, :wls)
-    end
-    if pass_pl
-        push!(methods_pass, :profile_likelihood)
-    end
-
-    primary = isfinite(r_pl.beta_hat) ? r_pl : (isfinite(r_wls.beta_hat) ? r_wls : r_ols)
-    overall_pass = n_agree >= 2 || (n_valid == 1 && n_agree == 1)
-    verdict = overall_pass ? "PASS (consensus $(n_agree)/$(n_valid))" : "FAIL (only $(n_agree)/$(n_valid) agree)"
-
-    return (
-        beta_hat = primary.beta_hat,
-        beta_se = primary.beta_se,
-        beta_ci = primary.beta_ci,
-        p_value = primary.p_value,
-        pass = overall_pass,
-        verdict = verdict,
-        consensus_n = n_valid,
-        n_agree = n_agree,
-        methods_pass = methods_pass,
-        primary_method = primary.method,
-        C = primary.C,
-        kappa_star_eff = hasproperty(primary, :kappa_star_eff) ? primary.kappa_star_eff : NaN,
-        n_points = primary.n_points,
-        ols = r_ols,
-        wls = r_wls,
-        pl = r_pl,
-    )
-end
-
-function run_scaling_regression_pipeline(
-    p::Params,
-    kappa_star_B::Float64;
-    N::Int,
-    T::Float64,
-    dt::Float64,
-    n_ensemble::Int,
-    base_seed::Int,
-    snapshot_times::Vector{Float64},
-    mt_stride::Int,
-    parallel::Bool,
-)
-    if !isfinite(kappa_star_B)
-        error("Scaling regression requires finite kappa*_B.")
-    end
-    kappas_above, deltas_above = build_scaling_grid(kappa_star_B)
-    kappas_sub, deltas_sub = build_scaling_baseline_grid(kappa_star_B)
-
-    grid_rows = vcat(
-        [(
-            kappa=κ,
-            delta_rel=δ,
-            delta_abs=κ - kappa_star_B,
-            region="above",
-            grid_tag="initial",
-        ) for (κ, δ) in zip(kappas_above, deltas_above)],
-        [(
-            kappa=κ,
-            delta_rel=δ,
-            delta_abs=κ - kappa_star_B,
-            region="subcritical",
-            grid_tag="initial",
-        ) for (κ, δ) in zip(kappas_sub, deltas_sub)],
-    )
-    CSV.write(joinpath(sweep_dir, "scaling_grid.csv"), DataFrame(grid_rows))
-
-    logmsg("Running scaling sweep (above kappa*_B)")
-    scaling_rows = run_scaling_grid(
-        p,
-        kappas_above,
-        deltas_above,
-        kappa_star_B;
-        label="above",
-        N=N,
-        T=T,
-        dt=dt,
-        n_ensemble=n_ensemble,
-        base_seed=base_seed + 20000,
-        snapshot_times=snapshot_times,
-        mt_stride=mt_stride,
-        parallel=parallel,
-        pdec_min=scaling_pdec_min,
-    )
-
-    logmsg("Running scaling sweep (subcritical baseline)")
-    baseline_rows = run_scaling_grid(
-        p,
-        kappas_sub,
-        deltas_sub,
-        kappa_star_B;
-        label="sub",
-        N=N,
-        T=T,
-        dt=dt,
-        n_ensemble=n_ensemble,
-        base_seed=base_seed + 40000,
-        snapshot_times=snapshot_times,
-        mt_stride=mt_stride,
-        parallel=parallel,
-        pdec_min=scaling_pdec_min,
-    )
-
-    scaling_df = DataFrame(scaling_rows)
-    baseline_df = DataFrame(baseline_rows)
-
-    finite_baseline = baseline_df.m_abs_star[isfinite.(baseline_df.m_abs_star)]
-    m0 = isempty(finite_baseline) ? NaN : median(finite_baseline)
-    scaling_df.m_corr = sqrt.(max.(scaling_df.m_abs_star .^ 2 .- m0^2, 0.0))
-    scaling_df.m0_floor = fill(m0, nrow(scaling_df))
-
-    window_used = scaling_delta_window_default
-    mask, stats = select_scaling_points(scaling_df; delta_window=window_used)
-
-    if sum(mask) < scaling_n_min && scaling_allow_window_expand
-        window_used = scaling_max_window_expand
-        mask, stats = select_scaling_points(scaling_df; delta_window=window_used)
-    end
-
-    if sum(mask) < scaling_n_min
-        if scaling_allow_window_expand
-            expanded_target = max(scaling_n_target, 96)
-            kappas_extra, deltas_extra = build_scaling_grid(
-                kappa_star_B;
-                delta_min=window_used[1],
-                delta_max=window_used[2],
-                n_target=expanded_target,
-            )
-            existing = scaling_df.kappa
-            missing_idx = findall(k -> all(abs.(existing .- k) .> 1e-12), kappas_extra)
-            if !isempty(missing_idx)
-                logmsg("Expanding scaling grid to recover n>=$(scaling_n_min) (extra points=$(length(missing_idx)))")
-                extra_rows = run_scaling_grid(
-                    p,
-                    kappas_extra[missing_idx],
-                    deltas_extra[missing_idx],
-                    kappa_star_B;
-                    label="expanded",
-                    N=N,
-                    T=T,
-                    dt=dt,
-                    n_ensemble=n_ensemble,
-                    base_seed=base_seed + 60000,
-                    snapshot_times=snapshot_times,
-                    mt_stride=mt_stride,
-                    parallel=parallel,
-                    pdec_min=scaling_pdec_min,
-                )
-                extra_df = DataFrame(extra_rows)
-                if !hasproperty(scaling_df, :m_corr)
-                    scaling_df.m_corr = fill(NaN, nrow(scaling_df))
-                end
-                if !hasproperty(scaling_df, :m0_floor)
-                    scaling_df.m0_floor = fill(m0, nrow(scaling_df))
-                end
-                if !hasproperty(extra_df, :m_corr)
-                    extra_df.m_corr = fill(NaN, nrow(extra_df))
-                end
-                if !hasproperty(extra_df, :m0_floor)
-                    extra_df.m0_floor = fill(m0, nrow(extra_df))
-                end
-                scaling_df = vcat(scaling_df, extra_df; cols=:union)
-                scaling_df.m_corr = sqrt.(max.(scaling_df.m_abs_star .^ 2 .- m0^2, 0.0))
-                scaling_df.m0_floor = fill(m0, nrow(scaling_df))
-            end
-            mask, stats = select_scaling_points(scaling_df; delta_window=window_used)
-        end
-    end
-
-    if sum(mask) < scaling_n_min
-        error("Scaling regression requires >=$(scaling_n_min) points; found $(sum(mask)). " *
-              "Window=$(window_used), counts: window=$(stats.window_count), converged=$(stats.converged_count), " *
-              "decided=$(stats.decided_count), saturation=$(stats.saturation_count). " *
-              "Consider increasing T_max or scaling_n_target.")
-    end
-
-    x = log.(scaling_df.kappa[mask] .- kappa_star_B)
-    y = log.(scaling_df.m_corr[mask])
-    fit = fit_scaling_ols(x, y)
-
-    scaling_df.x_log = log.(scaling_df.kappa .- kappa_star_B)
-    scaling_df.y_log = log.(scaling_df.m_corr .+ 1e-12)
-    scaling_df.used = mask
-    scaling_df.window_min = fill(window_used[1], nrow(scaling_df))
-    scaling_df.window_max = fill(window_used[2], nrow(scaling_df))
-    CSV.write(joinpath(sweep_dir, "scaling_regression_data.csv"), scaling_df)
-
-    return (
-        fit=fit,
-        window_used=window_used,
-        stats=stats,
-        m0=m0,
-        scaling_df=scaling_df,
-        baseline_df=baseline_df,
-    )
-end
-
-function scaling_pipeline_from_df(df::DataFrame, kappa_star_B::Float64)
-    used = has_col(df, :used) ? df[!, :used] .== true : trues(nrow(df))
-    n_used = sum(used)
-    if n_used < scaling_n_min
-        error("Existing scaling_regression_data.csv has only $(n_used) usable points; delete it or rerun without --reuse-scaling.")
-    end
-    x = has_col(df, :x_log) ? df[!, :x_log][used] : log.(df[!, :kappa][used] .- kappa_star_B)
-    y = has_col(df, :y_log) ? df[!, :y_log][used] : log.(df[!, :m_corr][used])
-    fit = fit_scaling_ols(x, y)
-    window_used = if has_col(df, :window_min) && has_col(df, :window_max)
-        (minimum(df[!, :window_min]), maximum(df[!, :window_max]))
-    else
-        scaling_delta_window_default
-    end
-    m0 = has_col(df, :m0_floor) ? df[!, :m0_floor][1] : NaN
-    stats = (
-        window_count=n_used,
-        converged_count=n_used,
-        decided_count=n_used,
-        saturation_count=n_used,
-        saturation_threshold=NaN,
-    )
-    return (fit=fit, window_used=window_used, stats=stats, m0=m0, scaling_df=df, baseline_df=DataFrame())
-end
-
-
-# ---------------------------------------------------------------------------
-# SYNTHETIC TEST GATE — verifies all three β estimators on known data
-# ---------------------------------------------------------------------------
-function synthetic_beta_test_gate(; verbose::Bool = false)
-    Random.seed!(42)
-    κ_true = 10.0
-    β_true = 0.5
-    C_true = 1.0
-
-    n_clean = 60
-    δ_grid = exp.(range(log(1e-2), log(2e-1); length=n_clean))
-    κ_grid = κ_true .* (1 .+ δ_grid)
-    m_clean = C_true .* δ_grid .^ β_true
-
-    σ_noise = 0.05 .* m_clean .+ 0.01 .* δ_grid .^ (-0.3) .* 1e-3
-    m_obs = max.(m_clean .+ σ_noise .* randn(n_clean), 1e-8)
-    se_obs = σ_noise
-
-    n_out = 5
-    δ_out = 0.4 .+ 0.1 .* rand(n_out)
-    m_out = C_true .* δ_out .^ β_true .* (2.5 .+ rand(n_out))
-    κ_out = κ_true .* (1 .+ δ_out)
-    se_out = fill(0.3, n_out)
-
-    κ_all = vcat(κ_grid, κ_out)
-    m_all = vcat(m_obs, m_out)
-    se_all = vcat(se_obs, se_out)
-    conv_all = trues(length(κ_all))
-
-    κ_star_biased = κ_true * 1.03
-
-    tol = 0.15
-
-    r_pl = _fit_profile_likelihood(κ_all, m_all, se_all;
-                                    δ_lo=1e-2, δ_hi=2e-1,
-                                    κ_lo=κ_true * 0.85, κ_hi=κ_true * 1.15,
-                                    n_κ=50)
-    pass_pl = isfinite(r_pl.beta_hat) && abs(r_pl.beta_hat - β_true) < tol
-
-    κ_for_gate = isfinite(r_pl.kappa_star_eff) ? r_pl.kappa_star_eff : κ_star_biased
-
-    r_ols = _fit_ols_cooks_d(κ_all, m_all, κ_for_gate; δ_lo=1e-2, δ_hi=2e-1)
-    pass_ols = isfinite(r_ols.beta_hat) && abs(r_ols.beta_hat - β_true) < tol
-
-    r_wls = _fit_wls(κ_all, m_all, se_all, κ_for_gate; δ_lo=1e-2, δ_hi=2e-1)
-    pass_wls = isfinite(r_wls.beta_hat) && abs(r_wls.beta_hat - β_true) < tol
-
-    if verbose
-        @printf("[SYNTEST] OLS  β=%.4f  (pass=%s)\n", r_ols.beta_hat, pass_ols)
-        @printf("[SYNTEST] WLS  β=%.4f  (pass=%s)\n", r_wls.beta_hat, pass_wls)
-        @printf("[SYNTEST] PL   β=%.4f  (κ*_eff=%.4f)  (pass=%s)\n",
-                r_pl.beta_hat, r_pl.kappa_star_eff, pass_pl)
-    end
-
-    n_pass = pass_ols + pass_wls + pass_pl
-    if n_pass >= 2
-        println("[SYNTEST] SYNTHETIC TEST: PASS ($(n_pass)/3 estimators within ±$(tol) of β=0.5)")
-    else
-        error("[SYNTEST] SYNTHETIC TEST FAILED: only $(n_pass)/3 estimators passed. Fix estimator code before running real simulations.")
-    end
-    return (pass=n_pass >= 2, n_pass=n_pass, ols=r_ols, wls=r_wls, pl=r_pl)
 end
 
 function convergence_slope(time_grid::Vector{Float64}, series::Vector{Float64}; frac::Float64 = 0.1)
@@ -1620,12 +706,7 @@ function convergence_slope(time_grid::Vector{Float64}, series::Vector{Float64}; 
     return coeffs[2]
 end
 
-function is_converged(
-    time_grid::Vector{Float64},
-    series::Vector{Float64};
-    frac::Float64 = 0.1,
-    tol_rel::Float64 = convergence_slope_tol,
-)
+function is_converged(time_grid::Vector{Float64}, series::Vector{Float64}; frac::Float64 = 0.1)
     slope = convergence_slope(time_grid, series; frac=frac)
     if !isfinite(slope)
         return false
@@ -1636,7 +717,7 @@ function is_converged(
         return true
     end
     tail_mean = mean(series[idx])
-    return abs(slope) <= tol_rel * max(tail_mean, 1e-6)
+    return abs(slope) <= convergence_slope_tol * max(tail_mean, 1e-6)
 end
 
 function is_valid_variance(V::Float64; max_reasonable::Float64 = 100.0)
@@ -1914,7 +995,7 @@ function test_scaling_exponent(
     y_pred = X * coeffs
     residuals = y .- y_pred
     sigma_sq = sum(residuals .^ 2) / (n - 2)
-    var_covar = ols_var_covar(X, sigma_sq)
+    var_covar = sigma_sq * inv(X' * X)
     se_beta = sqrt(var_covar[2, 2])
 
     t_stat = (beta_hat - 0.5) / se_beta
@@ -2131,7 +1212,7 @@ function fit_scaling_with_free_kappa_star(
     mask = isfinite.(amplitudes) .& (amplitudes .> 1e-8) .& isfinite.(kappas)
     k = kappas[mask]
     a = amplitudes[mask]
-    if length(k) < 3
+    if length(k) < 30
         return (kappa_star_fit=NaN, C_fit=NaN, beta_fit=NaN, converged=false)
     end
 
@@ -2241,15 +1322,11 @@ end
 # MAIN WORKFLOW
 # =============================================================================
 
-function main()
 println("=" ^ 72)
 println("FIGURE 6 ENSEMBLE VALIDATION")
 println("=" ^ 72)
 
 logmsg("Starting ensemble validation run")
-if any(arg -> arg in ("-deep", "--deep"), ARGS) || RUN_MODE == :deep
-    synthetic_beta_test_gate(; verbose=true)
-end
 p = Params(λ=lambda, σ=sigma, Θ=theta, c0=c0, hazard=StepHazard(nu0))
 
 logmsg("Estimating V*")
@@ -2264,7 +1341,7 @@ kappa_star_B = kappaB_res.kappa_B
 kappa_star_A = NaN
 kappa_star_A_ci = (NaN, NaN)
 growth_scan_df = DataFrame()
-if growth_scan_enabled && run_growth_scan && isfinite(kappa_star_B)
+if growth_scan_enabled && isfinite(kappa_star_B)
     logmsg("Running growth scan for kappa*_A (empirical)")
     kappa_grid = kappa_star_B .* growth_scan_factors
     rows, boot_slopes = growth_scan_kappa_A(
@@ -2280,6 +1357,7 @@ if growth_scan_enabled && run_growth_scan && isfinite(kappa_star_B)
         window=growth_scan_window,
         n_boot=growth_scan_bootstrap,
         parallel=parallel_ensemble,
+        device=simulation_device,
     )
     growth_scan_df = DataFrame(rows)
     CSV.write(joinpath(threshold_dir, "growth_scan.csv"), growth_scan_df)
@@ -2289,8 +1367,6 @@ if growth_scan_enabled && run_growth_scan && isfinite(kappa_star_B)
         kappa_boot = [estimate_kappa_star_from_scan(kappa_grid, boot_slopes[b, :]) for b in 1:growth_scan_bootstrap]
         kappa_star_A_ci = (quantile(kappa_boot, 0.025), quantile(kappa_boot, 0.975))
     end
-elseif growth_scan_enabled && !run_growth_scan
-    logmsg("Skipping growth scan (requested). Using kappa*_B as reference.")
 end
 
 @printf("kappa*_A = %.4f (CI=[%.4f, %.4f])\n", kappa_star_A, kappa_star_A_ci[1], kappa_star_A_ci[2])
@@ -2360,6 +1436,7 @@ for (label, ratio) in scenario_ratios
         store_snapshots=true,
         track_moments=true,
         parallel=parallel_ensemble,
+        device=simulation_device,
     )
     results[label] = res
     stats[label] = compute_ensemble_statistics(res)
@@ -2632,6 +1709,7 @@ if run_sweep
                 store_snapshots=true,
                 track_moments=true,
                 parallel=parallel_ensemble,
+                device=simulation_device,
             )
 
             time_grid_use = res.time_grid
@@ -2775,21 +1853,9 @@ if run_sweep
     equilibrium_df = DataFrame(equilibrium_rows)
 
     # Baseline correction for finite-size floor in |m|
-    # Use only deeply subcritical points (κ < 0.85 κ*_B) for the noise floor.
-    # Points near κ* already show embryonic symmetry-breaking and inflate m₀.
-    deep_mask  = (equilibrium_df.kappa .< 0.85 * kappa_star_B) .&
-                 .!ismissing.(equilibrium_df.m_abs_star)
-    deep_vals  = filter(isfinite, equilibrium_df.m_abs_star[deep_mask])
-    m0 = if isempty(deep_vals)
-        0.0
-    else
-        # Trimmed mean: drop top 10% to guard against rare high-amplitude outliers
-        sv     = sort(deep_vals)
-        n_keep = max(1, floor(Int, 0.9 * length(sv)))
-        mean(sv[1:n_keep])
-    end
-    @printf("[BASELINE] m₀ = %.6f  (%d deep-subcritical points, κ < 0.85 κ*)\n",
-            m0, length(deep_vals))
+    below_mask = (equilibrium_df.kappa .< kappa_star_B) .& .!ismissing.(equilibrium_df.m_abs_star)
+    below_vals = filter(isfinite, equilibrium_df.m_abs_star[below_mask])
+    m0 = isempty(below_vals) ? 0.0 : median(below_vals)
     equilibrium_df.m_corr_star = sqrt.(max.(equilibrium_df.m_abs_star .^ 2 .- m0^2, 0.0))
     sweep_df.m_corr_star = sqrt.(max.(sweep_df.m_abs_star .^ 2 .- m0^2, 0.0))
 
@@ -2827,270 +1893,39 @@ if run_sweep
     println("\n" * "="^60)
     println("BIFURCATION VALIDATION: SCALING EXPONENT TEST")
     println("="^60)
-    println("Observable : M_corr = sqrt(max(M_abs² − m0², 0))")
-    println("Model      : M_corr = C·(κ−κ*)^β")
-    println("H0         : β = 0.5  (supercritical pitchfork)")
-    println("Mode       : $(deep_mode ? "DEEP (OLS+WLS+PL consensus)" : "STANDARD (OLS)")")
+    println("Model: M_corr = C (kappa - kappa*)^beta (baseline-corrected |m|)")
+    println("H0: beta = 0.5 (supercritical pitchfork)")
     println()
 
-    scaling_pipeline = nothing
-    if run_scaling_regression && !isempty(equilibrium_df)
+    valid_mask = isfinite.(equilibrium_amplitudes_corr) .& isfinite.(equilibrium_kappas)
+    scaling_results = test_scaling_exponent_robust(
+        equilibrium_kappas[valid_mask],
+        equilibrium_amplitudes_corr[valid_mask],
+        equilibrium_variances[valid_mask],
+        kappa_star_B;
+        alpha=0.05,
+        decided_share=equilibrium_df.decided_share[valid_mask],
+        converged=equilibrium_df.converged[valid_mask],
+        min_decided_share=0.8,
+    )
+    scaling_result = scaling_results.analytic
 
-        κ_star_ref = isfinite(kappa_star_A) ? kappa_star_A : kappa_star_B
-        @printf("  κ*_ref = %.4f (%s)\n", κ_star_ref,
-                isfinite(kappa_star_A) ? "empirical κ*_A" : "theory κ*_B")
-
-        m0_deep = deep_mode ? _compute_deep_baseline_m0(equilibrium_df, κ_star_ref) : m0
-
-        equilibrium_df.m_corr_deep = sqrt.(max.(equilibrium_df.m_abs_star .^ 2 .- m0_deep^2, 0.0))
-        sweep_df.m_corr_deep = sqrt.(max.(sweep_df.m_abs_star .^ 2 .- m0_deep^2, 0.0))
-
-        has_se = hasproperty(equilibrium_df, :m_abs_ci_lower) && all(isfinite.(equilibrium_df.m_abs_ci_lower))
-        m_abs_se_col = has_se ?
-            (equilibrium_df.m_abs_star .- equilibrium_df.m_abs_ci_lower) ./ 1.96 :
-            fill(0.05 .* mean(filter(isfinite, equilibrium_df.m_abs_star)), nrow(equilibrium_df))
-        m_abs_se_col = max.(m_abs_se_col, 1e-8)
-
-        reg_conv_mask = hasproperty(equilibrium_df, :converged) ?
-            BitVector(equilibrium_df.converged .== true) :
-            trues(nrow(equilibrium_df))
-        reg_df = equilibrium_df[reg_conv_mask, :]
-        @printf("  Convergence filter: %d/%d sweep points pass (deep mode)\n",
-                sum(reg_conv_mask), nrow(equilibrium_df))
-
-        κ_vec = reg_df.kappa
-        m_vec = reg_df.m_corr_deep
-        se_vec = m_abs_se_col[reg_conv_mask]
-
-        win_default = scaling_delta_window_default
-        if deep_mode && deep_bic_window
-            win_bic, _, bic_val = _select_bic_window(κ_vec, m_vec, se_vec, κ_star_ref)
-            win_used = win_bic
-            @printf("  BIC window selected: δ∈[%.4f, %.4f]  (BIC=%.2f)\n",
-                    win_used[1], win_used[2], bic_val)
-        else
-            win_used = win_default
-        end
-
-        if fast_mode
-            max_delta = maximum((κ_vec .- κ_star_ref) ./ κ_star_ref)
-            if isfinite(max_delta) && max_delta > win_used[2]
-                win_used = (win_used[1], max_delta)
-                @printf("  FAST_MODE: expanded δ window to [%.4f, %.4f] to include coarse sweep points\n",
-                        win_used[1], win_used[2])
-            end
-        end
-
-        if deep_mode && deep_regression
-            pl_lo = κ_star_ref * 0.85
-            pl_hi = κ_star_ref * 1.15
-            if isfinite(kappa_star_A_ci[1]) && isfinite(kappa_star_A_ci[2])
-                pl_lo = max(pl_lo, kappa_star_A_ci[1] * 0.98)
-                pl_hi = min(pl_hi, kappa_star_A_ci[2] * 1.02)
-            end
-            r_pl = _fit_profile_likelihood(
-                κ_vec, m_vec, se_vec;
-                δ_lo=win_used[1], δ_hi=win_used[2],
-                κ_lo=pl_lo, κ_hi=pl_hi, n_κ=80,
-            )
-            @printf("  Profile-likeli : β=%.4f ± %.4f  κ*_eff=%.4f  n=%d\n",
-                    r_pl.beta_hat, r_pl.beta_se, r_pl.kappa_star_eff, r_pl.n_points)
-
-            κ_for_ols_wls = isfinite(r_pl.kappa_star_eff) ? r_pl.kappa_star_eff : κ_star_ref
-
-            r_ols = _fit_ols_cooks_d(κ_vec, m_vec, κ_for_ols_wls; δ_lo=win_used[1], δ_hi=win_used[2])
-            @printf("  OLS (Cook's D) : β=%.4f ± %.4f  n=%d  removed=%d  [at κ*_eff=%.4f]\n",
-                    r_ols.beta_hat, r_ols.beta_se, r_ols.n_points,
-                    hasproperty(r_ols, :n_removed) ? r_ols.n_removed : 0,
-                    κ_for_ols_wls)
-
-            r_wls = _fit_wls(κ_vec, m_vec, se_vec, κ_for_ols_wls; δ_lo=win_used[1], δ_hi=win_used[2])
-            @printf("  WLS            : β=%.4f ± %.4f  n=%d  [at κ*_eff=%.4f]\n",
-                    r_wls.beta_hat, r_wls.beta_se, r_wls.n_points,
-                    κ_for_ols_wls)
-
-            consensus = _consensus_beta_test(r_ols, r_wls, r_pl)
-            @printf("\n  CONSENSUS β = %.4f ± %.4f  [%.4f, %.4f]  p=%.4f\n",
-                    consensus.beta_hat, consensus.beta_se,
-                    consensus.beta_ci[1], consensus.beta_ci[2], consensus.p_value)
-            println("  Primary method : $(consensus.primary_method)")
-            println("  κ*_eff         : $(round(consensus.kappa_star_eff, digits=4))")
-            println("  -> $(consensus.verdict)")
-
-            if !isempty(r_pl.profile_grid)
-                pl_df = DataFrame(kappa_grid=r_pl.profile_grid, rss=r_pl.profile_rss)
-                CSV.write(joinpath(sweep_dir, "profile_likelihood_kappa.csv"), pl_df)
-            end
-
-            est_rows = [
-                (method="ols_cooks", beta_hat=r_ols.beta_hat, beta_se=r_ols.beta_se,
-                 ci_lo=r_ols.beta_ci[1], ci_hi=r_ols.beta_ci[2], p_value=r_ols.p_value,
-                 n_points=r_ols.n_points, C=r_ols.C, kappa_star_eff=κ_for_ols_wls,
-                 delta_lo=win_used[1], delta_hi=win_used[2]),
-                (method="wls", beta_hat=r_wls.beta_hat, beta_se=r_wls.beta_se,
-                 ci_lo=r_wls.beta_ci[1], ci_hi=r_wls.beta_ci[2], p_value=r_wls.p_value,
-                 n_points=r_wls.n_points, C=r_wls.C, kappa_star_eff=κ_for_ols_wls,
-                 delta_lo=win_used[1], delta_hi=win_used[2]),
-                (method="profile_likelihood", beta_hat=r_pl.beta_hat, beta_se=r_pl.beta_se,
-                 ci_lo=r_pl.beta_ci[1], ci_hi=r_pl.beta_ci[2], p_value=r_pl.p_value,
-                 n_points=r_pl.n_points, C=r_pl.C, kappa_star_eff=r_pl.kappa_star_eff,
-                 delta_lo=win_used[1], delta_hi=win_used[2]),
-            ]
-            CSV.write(joinpath(sweep_dir, "beta_estimators_detail.csv"), DataFrame(est_rows))
-
-            scaling_result = (
-                beta_hat = consensus.beta_hat,
-                beta_se = consensus.beta_se,
-                beta_ci = consensus.beta_ci,
-                C = consensus.C,
-                t_statistic = (consensus.beta_hat - 0.5) / max(consensus.beta_se, 1e-12),
-                p_value = consensus.p_value,
-                n_points = consensus.n_points,
-                pass = consensus.pass,
-                verdict = consensus.verdict,
-                delta_window = win_used,
-            )
-            scaling_results = (
-                analytic = scaling_result,
-                free = (
-                    kappa_star_fit = consensus.kappa_star_eff,
-                    C_fit = consensus.C,
-                    beta_fit = consensus.beta_hat,
-                    converged = isfinite(consensus.beta_hat),
-                ),
-                kappa_varmin = estimate_kappa_varmin(equilibrium_kappas, equilibrium_variances),
-                analytic_windows = [scaling_result],
-                delta_windows = [win_used],
-                default_window = win_used,
-                consensus = consensus,
-                deep_mode = true,
-            )
-
-        else
-            r_ols = _fit_ols_cooks_d(
-                κ_vec,
-                m_vec,
-                κ_star_ref;
-                δ_lo=win_used[1],
-                δ_hi=win_used[2],
-                min_points=fast_mode ? 3 : 4,
-            )
-            @printf("  OLS (Cook's D) : β=%.4f ± %.4f  n=%d  removed=%d\n",
-                    r_ols.beta_hat, r_ols.beta_se, r_ols.n_points,
-                    hasproperty(r_ols, :n_removed) ? r_ols.n_removed : 0)
-            r_pl = (beta_hat=NaN, beta_se=NaN, beta_ci=(NaN, NaN), p_value=NaN,
-                    n_points=0, C=NaN, kappa_star_eff=κ_star_ref, method=:none)
-            r_wls = (beta_hat=NaN, beta_se=NaN, beta_ci=(NaN, NaN), p_value=NaN,
-                     n_points=0, C=NaN, kappa_star_eff=κ_star_ref, method=:none)
-
-            pass = isfinite(r_ols.beta_hat) && r_ols.beta_ci[1] <= 0.5 <= r_ols.beta_ci[2] && r_ols.p_value > 0.05
-            scaling_result = (
-                beta_hat = r_ols.beta_hat,
-                beta_se = r_ols.beta_se,
-                beta_ci = r_ols.beta_ci,
-                C = r_ols.C,
-                t_statistic = r_ols.t_statistic,
-                p_value = r_ols.p_value,
-                n_points = r_ols.n_points,
-                pass = pass,
-                verdict = pass ? "PASS" : "FAIL",
-                delta_window = win_used,
-            )
-            scaling_results = (
-                analytic = scaling_result,
-                free = (kappa_star_fit=κ_star_ref, C_fit=r_ols.C,
-                        beta_fit=r_ols.beta_hat, converged=isfinite(r_ols.beta_hat)),
-                kappa_varmin = estimate_kappa_varmin(equilibrium_kappas, equilibrium_variances),
-                analytic_windows = [scaling_result],
-                delta_windows = [win_used],
-                default_window = win_used,
-                deep_mode = false,
-            )
-            println("\n--- Scaling Exponent (OLS, standard mode) ---")
-            @printf("  β = %.4f ± %.4f  95%%CI=[%.4f, %.4f]  p=%.4f  n=%d\n",
-                    scaling_result.beta_hat, scaling_result.beta_se,
-                    scaling_result.beta_ci[1], scaling_result.beta_ci[2],
-                    scaling_result.p_value, scaling_result.n_points)
-            println("  -> $(scaling_result.verdict)")
-        end
-
-        sc_rows = Vector{NamedTuple}()
-        δ_all = (equilibrium_df.kappa .- κ_star_ref) ./ κ_star_ref
-        for i in 1:nrow(equilibrium_df)
-            push!(sc_rows, (
-                kappa = equilibrium_df.kappa[i],
-                delta_rel = δ_all[i],
-                delta = δ_all[i],
-                delta_abs = equilibrium_df.kappa[i] - κ_star_ref,
-                m_abs_star = equilibrium_df.m_abs_star[i],
-                m_abs_ci = hasproperty(equilibrium_df, :m_abs_ci_lower) ?
-                           (equilibrium_df.m_abs_star[i] - equilibrium_df.m_abs_ci_lower[i]) : NaN,
-                m_corr = equilibrium_df.m_corr_deep[i],
-                m0_floor = m0_deep,
-                converged = hasproperty(equilibrium_df, :converged) ? equilibrium_df.converged[i] : true,
-                decided_share = hasproperty(equilibrium_df, :decided_share) ? equilibrium_df.decided_share[i] : NaN,
-                decided_ok = hasproperty(equilibrium_df, :decided_share) ? equilibrium_df.decided_share[i] >= scaling_pdec_min : true,
-                p_plus = hasproperty(equilibrium_df, :plus_share) ? equilibrium_df.plus_share[i] : NaN,
-                p_minus = hasproperty(equilibrium_df, :minus_share) ? equilibrium_df.minus_share[i] : NaN,
-                imbalance = hasproperty(equilibrium_df, :imbalance) ? equilibrium_df.imbalance[i] : NaN,
-                n_ensemble = hasproperty(equilibrium_df, :n_ensemble) ? equilibrium_df.n_ensemble[i] : NaN,
-                T_used = hasproperty(equilibrium_df, :T_sim) ? equilibrium_df.T_sim[i] : NaN,
-                attempts = 0,
-                x_log = δ_all[i] > 0 ? log(δ_all[i]) : NaN,
-                y_log = equilibrium_df.m_corr_deep[i] > 0 ? log(equilibrium_df.m_corr_deep[i]) : NaN,
-                used = isfinite(δ_all[i]) && δ_all[i] > win_used[1] && δ_all[i] <= win_used[2] && equilibrium_df.m_corr_deep[i] > scaling_amp_floor,
-                window_min = win_used[1],
-                window_max = win_used[2],
-                kappa_star_ref = κ_star_ref,
-                m_abs_se = m_abs_se_col[i],
-            ))
-        end
-        CSV.write(joinpath(sweep_dir, "scaling_regression_data.csv"), DataFrame(sc_rows))
-
-    else
-        logmsg("Skipping scaling regression (--skip-scaling or empty equilibrium_df)")
+    println("\n--- Summary ---")
+    function beta_range(window_results)
+        vals = [r.beta_hat for r in window_results if isfinite(r.beta_hat)]
+        return isempty(vals) ? (NaN, NaN) : (minimum(vals), maximum(vals))
     end
+    window_str = "[$(scaling_results.default_window[1]), $(scaling_results.default_window[2])]"
+    analytic_range = beta_range(scaling_results.analytic_windows)
 
-    if scaling_pipeline !== nothing
-        scaling_fit = scaling_pipeline.fit
-        scaling_window = scaling_pipeline.window_used
+    println("With kappa*_B (theory): beta = $(round(scaling_results.analytic.beta_hat, digits=3)) " *
+            "(n=$(scaling_results.analytic.n_points), window=$(window_str))")
+    println("  sensitivity across windows: [$(round(analytic_range[1], digits=3)), $(round(analytic_range[2], digits=3))]")
 
-        t_crit = quantile(TDist(max(1, scaling_fit.n_points - 2)), 0.975)
-        ci_lower = scaling_fit.beta_hat - t_crit * scaling_fit.beta_se
-        ci_upper = scaling_fit.beta_hat + t_crit * scaling_fit.beta_se
-        pass = scaling_fit.p_value > 0.05 && (ci_lower <= 0.5 <= ci_upper)
-        verdict = pass ? "PASS" : "FAIL"
-
-        scaling_result = (
-            beta_hat=scaling_fit.beta_hat,
-            beta_se=scaling_fit.beta_se,
-            beta_ci=(ci_lower, ci_upper),
-            log_C=scaling_fit.alpha,
-            C=exp(scaling_fit.alpha),
-            t_statistic=scaling_fit.t_statistic,
-            p_value=scaling_fit.p_value,
-            n_points=scaling_fit.n_points,
-            pass=pass,
-            verdict=verdict,
-            delta_window=scaling_window,
-        )
-
-        scaling_results = (
-            analytic=scaling_result,
-            free=(kappa_star_fit=NaN, C_fit=NaN, beta_fit=NaN, converged=false),
-            kappa_varmin=estimate_kappa_varmin(equilibrium_kappas, equilibrium_variances),
-            analytic_windows=[scaling_result],
-            delta_windows=[scaling_window],
-            default_window=scaling_window,
-        )
-
-        println("\n--- Summary ---")
-        println("With kappa*_B (theory): beta = $(round(scaling_result.beta_hat, digits=3)) " *
-                "(n=$(scaling_result.n_points), window=[$(scaling_window[1]), $(scaling_window[2])])")
-        println("Variance minimum (diagnostic): kappa_varmin = $(round(scaling_results.kappa_varmin, digits=4))")
-    else
-        scaling_result = nothing
-        scaling_results = nothing
+    println("Variance minimum (diagnostic): kappa_varmin = $(round(scaling_results.kappa_varmin, digits=4))")
+    if scaling_results.free.converged
+        println("With kappa*_free: beta = $(round(scaling_results.free.beta_fit, digits=3)), " *
+                "kappa* = $(round(scaling_results.free.kappa_star_fit, digits=4))")
     end
 
     println("\n" * "="^60)
@@ -3123,6 +1958,7 @@ if run_sweep
             store_snapshots=true,
             track_moments=true,
             parallel=parallel_ensemble,
+            device=simulation_device,
         )
 
         V_mean = NaN
@@ -3701,13 +2537,6 @@ metadata = Dict(
         "kappa_varmin" => metadata_kappa_varmin,
         "kappa_star_eff" => metadata_kappa_star_eff,
         "beta_fit" => metadata_beta_fit,
-        "deep_mode"         => deep_mode,
-        "scaling_primary_method" => isnothing(scaling_results) ? "not_run" :
-            (hasproperty(scaling_results, :consensus) ?
-             String(scaling_results.consensus.primary_method) : "ols"),
-        "beta_consensus_n_agree" => (!isnothing(scaling_results) &&
-                                     hasproperty(scaling_results, :consensus)) ?
-                                    scaling_results.consensus.n_agree : NaN,
         "C_fit" => metadata_C_fit,
         "kappa_ratio_at_V_baseline" => V_baseline_ratio,
         "scaling_delta_window" => hasproperty(scaling, :delta_window) ? [scaling.delta_window[1], scaling.delta_window[2]] : [NaN, NaN],
@@ -3716,7 +2545,7 @@ metadata = Dict(
     "timestamp" => Dates.format(now(), dateformat"yyyy-mm-dd HH:MM:SS"),
     "git_commit" => git_commit_hash(project_root),
 )
-JSON3.write(joinpath(outdir, "metadata.json"), sanitize_json(metadata))
+JSON3.write(joinpath(outdir, "metadata.json"), metadata)
 
 println("\nDone. Outputs written to:")
 println("  $outdir")
@@ -3724,16 +2553,3 @@ println("  $sweep_dir")
 println("  $figdir")
 println("  $docs_dir")
 println("  $snippets_dir")
-
-    scaling_pass = !isnothing(scaling_result) && scaling_result.pass
-    beta_hat = isnothing(scaling_result) ? NaN : scaling_result.beta_hat
-    beta_ci = isnothing(scaling_result) ? (NaN, NaN) : scaling_result.beta_ci
-    kappa_star_eff = isfinite(metadata_kappa_star_eff) ? metadata_kappa_star_eff : kappa_star_B
-    method_str = isnothing(scaling_result) ? "not_run" : (isfinite(metadata_kappa_star_eff) ? "free_kappa" : "fixed_kappaB")
-    @printf("[RESULT] scaling_pass=%s beta_hat=%.4f beta_ci=[%.4f,%.4f] method=%s kappa_star_eff=%.4f\n",
-        scaling_pass, beta_hat, beta_ci[1], beta_ci[2], method_str, kappa_star_eff)
-end
-
-if abspath(PROGRAM_FILE) == @__FILE__
-    main()
-end
