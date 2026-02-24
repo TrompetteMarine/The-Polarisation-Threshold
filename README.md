@@ -522,6 +522,11 @@ execution:
 - In hybrid mode, the scheduler reserves one outer worker for GPU jobs and uses up to `min(max_threads_outer, Threads.nthreads()-1)` CPU workers.
 - For full CPU saturation with one GPU worker, launch Julia with all physical threads and let hybrid mode keep one worker for GPU dispatch.
 - If `run_ensemble_oubr_gpu` is missing or CUDA is not functional, hybrid mode automatically falls back to CPU-only execution without changing outputs.
+- One-line launch (with `execution.device: "hybrid"` in your YAML): 
+
+```bash
+JULIA_NUM_THREADS=$(sysctl -n hw.ncpu) julia --project=. scripts/region_id/run_region_identification.jl --config configs/region_identification_run_config_OUBR_v1_02.yml
+```
 
 #### Output notes
 
