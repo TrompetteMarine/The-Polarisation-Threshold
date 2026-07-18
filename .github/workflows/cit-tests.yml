@@ -1,0 +1,32 @@
+name: CIT replication tests
+
+on:
+  push:
+    paths:
+      - 'CIT/**'
+      - '.github/workflows/cit-tests.yml'
+  pull_request:
+    paths:
+      - 'CIT/**'
+      - '.github/workflows/cit-tests.yml'
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -e 'CIT/python[dev]'
+      - run: pytest -q CIT/python/tests
+
+  julia:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: julia-actions/setup-julia@v2
+        with:
+          version: '1.10'
+      - uses: julia-actions/cache@v2
+      - run: julia --project=CIT/julia -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
