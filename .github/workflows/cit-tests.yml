@@ -30,10 +30,16 @@ jobs:
           version: '1.10'
       - uses: julia-actions/cache@v2
       - name: Run Julia tests
+        id: julia-tests
+        continue-on-error: true
         shell: bash
         run: |
-          set +e
-          julia --project=CIT/julia -e 'using Pkg; Pkg.instantiate(); Pkg.test()' > /tmp/cit-julia.log 2>&1
-          status=$?
-          tail -n 120 /tmp/cit-julia.log
-          exit $status
+          julia --project=CIT/julia -e 'using Pkg; Pkg.instantiate(); Pkg.test()' > cit-julia.log 2>&1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cit-julia-log
+          path: cit-julia.log
+      - name: Propagate Julia test result
+        if: steps.julia-tests.outcome == 'failure'
+        run: exit 1
