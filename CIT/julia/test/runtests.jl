@@ -1,4 +1,4 @@
-using Test, LinearAlgebra, CITReplication
+using Test, LinearAlgebra, Statistics, CITReplication
 
 @testset "CIT replication" begin
     model = ModelParameters()
