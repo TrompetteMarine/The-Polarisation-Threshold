@@ -29,4 +29,11 @@ jobs:
         with:
           version: '1.10'
       - uses: julia-actions/cache@v2
-      - run: julia --project=CIT/julia -e 'using Pkg; Pkg.instantiate(); Pkg.test()'
+      - name: Run Julia tests
+        shell: bash
+        run: |
+          set +e
+          julia --project=CIT/julia -e 'using Pkg; Pkg.instantiate(); Pkg.test()' > /tmp/cit-julia.log 2>&1
+          status=$?
+          tail -n 120 /tmp/cit-julia.log
+          exit $status
