@@ -3,6 +3,9 @@ using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 using CITReplication
 
+Base.include(CITReplication, joinpath(@__DIR__, "..", "src", "Plotting.jl"))
+Base.include(CITReplication, joinpath(@__DIR__, "..", "src", "Pipeline.jl"))
+
 publication = "--publication" in ARGS
 output = "outputs"
 for (i, argument) in enumerate(ARGS)
@@ -11,7 +14,7 @@ for (i, argument) in enumerate(ARGS)
     end
 end
 
-report = run_pipeline(output; publication)
+report = CITReplication.Pipeline.run_pipeline(output; publication)
 for key in sort(collect(keys(report)))
     println(key, ": ", report[key])
 end
