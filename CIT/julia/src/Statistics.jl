@@ -1,6 +1,6 @@
 module KernelStatistics
 
-using Statistics, Distributions
+using Statistics
 
 struct KernelSummary
     mean::Vector{Float64}
@@ -16,9 +16,10 @@ end
 trapz(t, y) = sum((y[1:end-1] .+ y[2:end]) .* diff(t)) / 2
 
 function summarize_kernel(times::Vector{Float64}, blocks::Matrix{Float64}; alpha=0.05)
+    alpha == 0.05 || throw(ArgumentError("the stdlib implementation currently supports alpha=0.05"))
     μ = vec(mean(blocks; dims=2))
     se = vec(std(blocks; dims=2, corrected=true)) ./ sqrt(size(blocks, 2))
-    z = quantile(Normal(), 1-alpha/2)
+    z = 1.959963984540054
     lower, upper = μ .- z .* se, μ .+ z .* se
     susceptibility = trapz(times, μ)
     positive = max.(μ, 0.0)
