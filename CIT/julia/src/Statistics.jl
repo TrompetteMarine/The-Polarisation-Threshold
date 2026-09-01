@@ -9,6 +9,7 @@ struct KernelSummary
     susceptibility::Float64
     positive_susceptibility::Float64
     threshold::Float64
+    positive_threshold::Float64
     support_95::Float64
     support_997::Float64
 end
@@ -22,6 +23,7 @@ function summarize_kernel(times::Vector{Float64}, blocks::Matrix{Float64}; alpha
     z = 1.959963984540054
     lower, upper = μ .- z .* se, μ .+ z .* se
     susceptibility = trapz(times, μ)
+    susceptibility > 0 || throw(ArgumentError("raw susceptibility must be positive"))
     positive = max.(μ, 0.0)
     positive_susceptibility = trapz(times, positive)
     positive_susceptibility > 0 || throw(ArgumentError("positive susceptibility must be non-zero"))
@@ -30,7 +32,8 @@ function summarize_kernel(times::Vector{Float64}, blocks::Matrix{Float64}; alpha
     i95 = findfirst(>=(0.95), share)
     i997 = findfirst(>=(0.997), share)
     KernelSummary(μ, lower, upper, susceptibility, positive_susceptibility,
-                  inv(positive_susceptibility), times[i95], times[i997])
+                  inv(susceptibility), inv(positive_susceptibility),
+                  times[i95], times[i997])
 end
 
 laplace_transform(times, kernel, args) = [trapz(times, exp.(-x .* times) .* kernel) for x in args]
