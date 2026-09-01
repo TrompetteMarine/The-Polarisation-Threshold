@@ -9,10 +9,14 @@ def main_figure(response, summary, generator, output: Path) -> None:
     times = response.times
     kernel = summary.mean
     positive = np.maximum(kernel, 0.0)
-    increments = np.r_[0.0, 0.5 * (positive[1:] + positive[:-1]) * np.diff(times)]
-    cumulative = np.cumsum(increments)
+    # Support markers remain positive-mass diagnostics only. The theorem-facing
+    # cumulative susceptibility and characteristic determinant use the raw
+    # signed response kernel throughout.
+    support_increments = np.r_[0.0, 0.5 * (positive[1:] + positive[:-1]) * np.diff(times)]
+    raw_increments = np.r_[0.0, 0.5 * (kernel[1:] + kernel[:-1]) * np.diff(times)]
+    cumulative = np.cumsum(raw_increments)
     x = np.linspace(0.0, 2.2, 280)
-    phi = laplace_transform(times, positive, x)
+    phi = laplace_transform(times, kernel, x)
 
     fig, axes = plt.subplots(2, 2, figsize=(12.4, 8.7), dpi=220)
     ax = axes[0, 0]
@@ -25,15 +29,15 @@ def main_figure(response, summary, generator, output: Path) -> None:
     ax = axes[0, 1]
     ax.fill_between(times, summary.lower, summary.upper, alpha=0.3, label="95% block band")
     ax.plot(times, kernel, linewidth=2.0, label="paired MC response")
-    ax.axvline(summary.support_997, linestyle="--", label="99.7% support")
+    ax.axvline(summary.support_997, linestyle="--", label="99.7% positive-mass support")
     ax.set(title="(B) Response kernel", xlabel="Time t", ylabel="k_h(t)")
     ax.legend()
 
     ax = axes[1, 0]
     ax.plot(times, cumulative, linewidth=2.0)
-    ax.axhline(summary.susceptibility, linestyle="--", label="MC susceptibility")
+    ax.axhline(summary.susceptibility, linestyle="--", label="MC raw susceptibility")
     ax.axhline(generator.susceptibility, linestyle=":", label="generator susceptibility")
-    ax.set(title="(C) Cumulative susceptibility", xlabel="Time t", ylabel="integrated response")
+    ax.set(title="(C) Cumulative raw susceptibility", xlabel="Time t", ylabel="integrated raw response")
     ax.legend()
 
     ax = axes[1, 1]
