@@ -23,6 +23,21 @@ def test_exponential_kernel_contract() -> None:
     assert abs(values[0] - 1.0) < 2e-3
     assert abs(values[1] - 0.5) < 2e-3
 
+def test_signed_kernel_uses_raw_threshold() -> None:
+    times = np.array([0.0, 1.0, 2.0, 3.0])
+    kernel = np.array([1.0, 0.6, -0.2, 0.0])
+    blocks = np.tile(kernel[:, None], (1, 8))
+    summary = summarize_kernel(times, blocks)
+    raw = float(np.trapezoid(kernel, times))
+    positive = float(np.trapezoid(np.maximum(kernel, 0.0), times))
+    assert raw > 0.0
+    assert positive > raw
+    assert np.isclose(summary.susceptibility, raw)
+    assert np.isclose(summary.positive_susceptibility, positive)
+    assert np.isclose(summary.threshold, 1.0 / raw)
+    assert np.isclose(summary.positive_threshold, 1.0 / positive)
+    assert not np.isclose(summary.threshold, summary.positive_threshold)
+
 def test_generator_contract() -> None:
     result = generator_cross_check(ModelParameters(), grid_points=401, domain=5.0)
     assert abs(result.stationary_mass.sum() - 1.0) < 1e-10
@@ -36,3 +51,4 @@ def test_fast_pipeline_writes_outputs(tmp_path: Path) -> None:
     assert (tmp_path / "metrics.json").exists()
     assert (tmp_path / "figure_numerical.png").exists()
     assert abs(report["k0"] - 1.0) < 1e-12
+    assert "mc_positive_threshold" in report

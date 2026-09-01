@@ -31,6 +31,7 @@ def run_pipeline(output_dir: Path, publication: bool = False) -> dict[str, float
         "mc_susceptibility": summary.susceptibility,
         "mc_positive_susceptibility": summary.positive_susceptibility,
         "mc_threshold": summary.threshold,
+        "mc_positive_threshold": summary.positive_threshold,
         "generator_susceptibility": generator.susceptibility,
         "generator_threshold": generator.threshold,
         "k0": float(summary.mean[0]),

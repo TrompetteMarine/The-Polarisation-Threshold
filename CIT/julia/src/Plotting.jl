@@ -34,10 +34,12 @@ function main_figure(response::ResponseResult, summary::KernelSummary, generator
     times = response.times
     kernel = summary.mean
     positive = max.(kernel,0.0)
-    increments = vcat(0.0,(positive[1:end-1] .+ positive[2:end]) .* diff(times) ./ 2)
-    cumulative = cumsum(increments)
+    # Positive mass is retained only for support diagnostics. The cumulative
+    # theorem susceptibility and characteristic determinant use the raw kernel.
+    raw_increments = vcat(0.0,(kernel[1:end-1] .+ kernel[2:end]) .* diff(times) ./ 2)
+    cumulative = cumsum(raw_increments)
     arguments = collect(range(0,2.2; length=280))
-    phi = laplace_transform(times,positive,arguments)
+    phi = laplace_transform(times,kernel,arguments)
     centres,density = histogram_density(response.stationary_u)
 
     width,height = 1200,850
@@ -56,10 +58,10 @@ function main_figure(response::ResponseResult, summary::KernelSummary, generator
         println(io,"<polyline fill='none' stroke='#d62728' stroke-width='2.5' points='$(points(times,kernel,x0+35,y0+30,pw-50,ph-65,0,maximum(times),-0.03,1.05))'/>")
         sx = x0+35+(pw-50)*summary.support_997/maximum(times)
         println(io,"<line x1='$sx' y1='$(y0+30)' x2='$sx' y2='$(y0+ph-35)' stroke='#1f77b4' stroke-dasharray='6,5'/>")
-        println(io,"<text x='$(x0+pw-220)' y='$(y0+110)' font-size='12'>MC Φ(0)=$(@sprintf("%.3f",summary.susceptibility))</text>")
+        println(io,"<text x='$(x0+pw-220)' y='$(y0+110)' font-size='12'>MC raw Φ(0)=$(@sprintf("%.3f",summary.susceptibility))</text>")
         println(io,"<text x='$(x0+pw-220)' y='$(y0+128)' font-size='12'>Generator Φ(0)=$(@sprintf("%.3f",generator.susceptibility))</text>")
 
-        x0,y0 = positions[3]; panel!(io,x0,y0,pw,ph,"(C) Cumulative susceptibility","Time t","Integrated response")
+        x0,y0 = positions[3]; panel!(io,x0,y0,pw,ph,"(C) Cumulative raw susceptibility","Time t","Integrated raw response")
         ymax = max(maximum(cumulative),generator.susceptibility)*1.15
         println(io,"<polyline fill='none' stroke='#1f77b4' stroke-width='2.5' points='$(points(times,cumulative,x0+35,y0+30,pw-50,ph-65,0,maximum(times),0,ymax))'/>")
         for (value,color) in ((summary.susceptibility,"#1f77b4"),(generator.susceptibility,"#ff7f0e"))
