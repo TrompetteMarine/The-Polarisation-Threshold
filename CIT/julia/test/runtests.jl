@@ -18,8 +18,9 @@ using Test, LinearAlgebra, Statistics, CITReplication
     signed_kernel = [1.0, 0.6, -0.2, 0.0]
     signed_blocks = repeat(signed_kernel, 1, 8)
     signed_summary = summarize_kernel(signed_times, signed_blocks)
-    raw = KernelStatistics.trapz(signed_times, signed_kernel)
-    positive = KernelStatistics.trapz(signed_times, max.(signed_kernel, 0.0))
+    raw = sum((signed_kernel[1:end-1] .+ signed_kernel[2:end]) .* diff(signed_times)) / 2
+    positive_kernel = max.(signed_kernel, 0.0)
+    positive = sum((positive_kernel[1:end-1] .+ positive_kernel[2:end]) .* diff(signed_times)) / 2
     @test raw > 0.0
     @test positive > raw
     @test isapprox(signed_summary.susceptibility, raw)
