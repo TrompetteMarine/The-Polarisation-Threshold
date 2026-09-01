@@ -41,6 +41,7 @@ function run_pipeline(output_dir::AbstractString="outputs"; publication::Bool=fa
         "mc_susceptibility"=>summary.susceptibility,
         "mc_positive_susceptibility"=>summary.positive_susceptibility,
         "mc_threshold"=>summary.threshold,
+        "mc_positive_threshold"=>summary.positive_threshold,
         "generator_susceptibility"=>generator.susceptibility,
         "generator_threshold"=>generator.threshold,
         "k0"=>summary.mean[1],
